@@ -192,6 +192,9 @@ define_overridable_option(
   EXECUTORCH_BUILD_CORTEX_M "Build the Cortex-M backend" BOOL OFF
 )
 define_overridable_option(
+  EXECUTORCH_BUILD_PULP "Build the PULP optimized kernels" BOOL OFF
+)
+define_overridable_option(
   EXECUTORCH_BUILD_CMSIS_NN_PYBINDS "Build the CMSIS-NN Python bindings" BOOL
   OFF
 )

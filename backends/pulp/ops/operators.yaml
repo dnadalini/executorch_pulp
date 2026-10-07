@@ -1,0 +1,12 @@
+# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+- func: pulp::quantized_conv2d.out(Tensor input, Tensor weight, int[] stride, int[] padding, int out_shift, int scratch_bytes, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::quantized_conv2d_out
+
