@@ -77,7 +77,8 @@ be configured with:
 
 ```bash
 cmake -S executorch -B build-pulp \
-  -DCMAKE_TOOLCHAIN_FILE=executorch/backends/pulp/cmake/pulp-open-toolchain.cmake \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/executorch/backends/pulp/cmake/pulp-open-toolchain.cmake" \
+  -DCMAKE_BUILD_TYPE=Release \
   -DEXECUTORCH_BUILD_PULP=ON \
   -DPULP_NN_ROOT="$PWD/preliminary_material/pulp-nn-example/pulp-nn" \
   -DEXECUTORCH_BUILD_CPUINFO=OFF \
@@ -98,7 +99,8 @@ python tests/simple_conv2d/generate_cnn_graph.py \
   --output-dir tests/simple_conv2d
 
 cmake -S executorch -B build-pulp \
-  -DCMAKE_TOOLCHAIN_FILE=executorch/backends/pulp/cmake/pulp-open-toolchain.cmake \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/executorch/backends/pulp/cmake/pulp-open-toolchain.cmake" \
+  -DCMAKE_BUILD_TYPE=Release \
   -DEXECUTORCH_BUILD_PULP=ON \
   -DPULP_NN_ROOT="$PWD/preliminary_material/pulp-nn-example/pulp-nn" \
   -DEXECUTORCH_BUILD_CPUINFO=OFF \
