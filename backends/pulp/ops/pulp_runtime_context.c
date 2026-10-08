@@ -117,4 +117,3 @@ int pulp_runtime_run_conv2d(PulpConv2dArgs* args) {
       &cluster_device, pi_cluster_task(&task, cluster_conv_entry, args));
   return args->status == 0;
 }
-

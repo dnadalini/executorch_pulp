@@ -66,7 +66,9 @@ class PulpConvQuantizationConfig(QuantizationConfig):
 
         def derive_output_qparams(obs_or_fqs: list[Any]):
             if len(obs_or_fqs) != 2:
-                raise ValueError("PULP Conv2d output requires input and weight observers")
+                raise ValueError(
+                    "PULP Conv2d output requires input and weight observers"
+                )
             input_scale, _ = obs_or_fqs[0].calculate_qparams()
             weight_scale, _ = obs_or_fqs[1].calculate_qparams()
             output_scale = input_scale * weight_scale * (1 << requant_shift)

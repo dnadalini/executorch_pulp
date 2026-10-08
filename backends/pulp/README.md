@@ -21,7 +21,9 @@ The quantizer chooses a conservative shift from the accumulator depth. The
 lowering pass verifies that the input/weight/output scale ratio is exactly
 `2^-out_shift`. The runtime passes `out_mult=1`, disables batch normalization
 and ReLU, and therefore uses PULP-NN's plain `clip_u8(accumulator >> out_shift)`
-path. No 64-bit arithmetic is introduced.
+path. The convolution and accumulation use the PULP-NN 32-bit path; the
+`int64_t` types visible in the operator schema are ExecuTorch metadata ABI
+types, not 64-bit convolution arithmetic.
 
 The im2col scratch requirement is part of the serialized operator and is
 checked again at runtime:
@@ -66,7 +68,48 @@ and `PULP_SDK_INCLUDE_DIRS` to the semicolon-separated PMSIS include paths.
 deliberately has a C ABI because this PULP SDK revision's headers are not
 C++-clean.
 
-ExecuTorch's root CMake currently requires its source directory to be named
-`executorch`. Because this fork is stored as `executorch_pulp`, configure it
-through a symlink named `executorch` (for example under `/tmp`) or rename the
-checkout for the native build.
+The fork is stored in `Edge_Dynamic_Compiler/executorch`, which satisfies
+ExecuTorch's requirement that its source directory be named `executorch`.
+Configure CMake directly from that directory; no source symlink is needed.
+
+After sourcing `setup_pulp_open.sh`, a minimal Siracusa static-library build can
+be configured with:
+
+```bash
+cmake -S executorch -B build-pulp \
+  -DCMAKE_TOOLCHAIN_FILE=executorch/backends/pulp/cmake/pulp-open-toolchain.cmake \
+  -DEXECUTORCH_BUILD_PULP=ON \
+  -DPULP_NN_ROOT="$PWD/preliminary_material/pulp-nn-example/pulp-nn" \
+  -DEXECUTORCH_BUILD_CPUINFO=OFF \
+  -DEXECUTORCH_BUILD_PTHREADPOOL=OFF \
+  -DEXECUTORCH_BUILD_PORTABLE_OPS=OFF \
+  -DEXECUTORCH_BUILD_EXECUTOR_RUNNER=OFF
+cmake --build build-pulp --target executorch_core pulp_ops_lib
+```
+
+## Siracusa GVSoC runner
+
+The runner embeds the PTE, input, and golden output directly in the L2 image;
+it does not use L3 or a host filesystem. From the parent repository:
+
+```bash
+source setup_pulp_open.sh
+python tests/simple_conv2d/generate_cnn_graph.py \
+  --output-dir tests/simple_conv2d
+
+cmake -S executorch -B build-pulp \
+  -DCMAKE_TOOLCHAIN_FILE=executorch/backends/pulp/cmake/pulp-open-toolchain.cmake \
+  -DEXECUTORCH_BUILD_PULP=ON \
+  -DPULP_NN_ROOT="$PWD/preliminary_material/pulp-nn-example/pulp-nn" \
+  -DEXECUTORCH_BUILD_CPUINFO=OFF \
+  -DEXECUTORCH_BUILD_PTHREADPOOL=OFF \
+  -DEXECUTORCH_BUILD_PORTABLE_OPS=OFF \
+  -DEXECUTORCH_BUILD_EXECUTOR_RUNNER=OFF
+cmake --build build-pulp --target executorch_core pulp_ops_lib
+
+make -C tests/simple_conv2d/runner clean all run
+```
+
+The final line should report `Validation: PASS`. The runner accepts
+`MODEL_DIR` and `EXECUTORCH_BUILD_DIR` overrides if the exported artifacts or
+CMake build are placed elsewhere.

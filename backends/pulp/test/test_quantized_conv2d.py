@@ -37,9 +37,7 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
 
         graph = edge.exported_program().graph
         pulp_nodes = [
-            node
-            for node in graph.nodes
-            if "pulp.quantized_conv2d" in str(node.target)
+            node for node in graph.nodes if "pulp.quantized_conv2d" in str(node.target)
         ]
         self.assertEqual(len(pulp_nodes), 1)
         self.assertEqual(pulp_nodes[0].args[-1], 2 * 8 * 32 * 3 * 3)

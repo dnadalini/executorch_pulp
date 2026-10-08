@@ -95,8 +95,6 @@ def quantized_conv2d_out_impl(
     out: torch.Tensor,
 ) -> torch.Tensor:
     out.copy_(
-        quantized_conv2d_impl(
-            input, weight, stride, padding, out_shift, scratch_bytes
-        )
+        quantized_conv2d_impl(input, weight, stride, padding, out_shift, scratch_bytes)
     )
     return out

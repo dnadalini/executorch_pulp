@@ -59,7 +59,9 @@ class PulpQuantizer(ComposableQuantizer):
         targets: set[OpOverload] = set()
         for pattern in PULP_PATTERNS:
             targets.update(pattern)
-        matcher = PatternMatcher(PULP_PATTERNS, support_dict_name=__name__ + ".PULP_PATTERNS")
+        matcher = PatternMatcher(
+            PULP_PATTERNS, support_dict_name=__name__ + ".PULP_PATTERNS"
+        )
         quantizers: list[Quantizer] = [
             PatternQuantizer(
                 PULP_CONV_CONFIG,
@@ -74,4 +76,3 @@ class PulpQuantizer(ComposableQuantizer):
 
     def transform_for_annotation(self, model: GraphModule) -> GraphModule:
         return cast(GraphModule, model)
-

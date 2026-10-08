@@ -10,10 +10,20 @@ endif()
 include(${EXECUTORCH_ROOT}/tools/cmake/Utils.cmake)
 include(${EXECUTORCH_ROOT}/tools/cmake/Codegen.cmake)
 
-set(PULP_NN_ROOT "" CACHE PATH "Path to the PULP-NN source tree")
-set(PULP_SDK_INCLUDE_DIRS "" CACHE STRING
-    "Semicolon-separated PMSIS include directories supplied by the PULP SDK")
-set(PULP_NUM_CORES 8 CACHE STRING "PULP cluster core count")
+set(PULP_NN_ROOT
+    ""
+    CACHE PATH "Path to the PULP-NN source tree"
+)
+set(PULP_SDK_INCLUDE_DIRS
+    ""
+    CACHE
+      STRING
+      "Semicolon-separated PMSIS include directories supplied by the PULP SDK"
+)
+set(PULP_NUM_CORES
+    8
+    CACHE STRING "PULP cluster core count"
+)
 
 if(EXECUTORCH_BUILD_PULP)
   if(NOT EXISTS "${PULP_NN_ROOT}/32bit/include/pulp_nn_kernels.h")
@@ -30,23 +40,25 @@ if(EXECUTORCH_BUILD_PULP)
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_utils.c
   )
   target_compile_definitions(pulp_nn PUBLIC NUM_CORES=${PULP_NUM_CORES})
-  target_include_directories(
-    pulp_nn PUBLIC ${PULP_NN_ROOT}/32bit/include ${PULP_SDK_INCLUDE_DIRS}
-  )
+  target_include_directories(pulp_nn PUBLIC ${PULP_NN_ROOT}/32bit/include)
+  target_include_directories(pulp_nn PRIVATE ${PULP_SDK_INCLUDE_DIRS})
 
   set(_pulp_kernel_sources
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_conv2d.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c)
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
+  )
   add_library(pulp_kernels ${_pulp_kernel_sources})
   target_compile_definitions(pulp_kernels PRIVATE NUM_CORES=${PULP_NUM_CORES})
   target_include_directories(
     pulp_kernels
-    PRIVATE ${EXECUTORCH_ROOT}/.. ${EXECUTORCH_ROOT}/runtime/core/portable_type/c10
-            ${PULP_NN_ROOT}/32bit/include ${PULP_SDK_INCLUDE_DIRS}
+    PRIVATE ${EXECUTORCH_ROOT}/..
+            ${EXECUTORCH_ROOT}/runtime/core/portable_type/c10
+            ${PULP_NN_ROOT}/32bit/include
   )
-  target_link_libraries(
-    pulp_kernels PRIVATE pulp_nn executorch_core kernels_util_all_deps
+  target_include_directories(
+    pulp_kernels PRIVATE $<$<COMPILE_LANGUAGE:C>:${PULP_SDK_INCLUDE_DIRS}>
   )
+  target_link_libraries(pulp_kernels PRIVATE pulp_nn executorch_core)
 
   set(_yaml_file ${CMAKE_CURRENT_LIST_DIR}/ops/operators.yaml)
   gen_selected_ops(LIB_NAME "pulp_ops_lib" OPS_SCHEMA_YAML "${_yaml_file}")

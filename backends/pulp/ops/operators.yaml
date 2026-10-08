@@ -9,4 +9,3 @@
   kernels:
     - arg_meta: null
       kernel_name: pulp::quantized_conv2d_out
-

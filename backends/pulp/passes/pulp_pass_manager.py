@@ -5,6 +5,7 @@ import inspect
 from typing import Any, Type
 
 from executorch.backends.arm._passes import FoldAndAnnotateQParamsPass
+from executorch.backends.transforms.utils import delete_constant_placeholder
 from executorch.exir.pass_base import (
     ExportedProgramPassBase,
     ExportedProgramPassResult,
@@ -12,7 +13,6 @@ from executorch.exir.pass_base import (
 )
 from executorch.exir.pass_manager import ExportedProgramPassManager
 from executorch.exir.program._program import _transform, lift_constant_tensor_pass
-from executorch.backends.transforms.utils import delete_constant_placeholder
 from torch.export import ExportedProgram
 from torch.export.graph_signature import InputKind
 

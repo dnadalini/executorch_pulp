@@ -71,13 +71,15 @@ def _get_convolution_replacement(
         raise ValueError("PULP-NN MVP requires zero-point 0 for all tensors")
 
     requantize_scale = (
-        float(input_quant.scale)
-        * float(weight_quant.scale)
-        / float(output_quant.scale)
+        float(input_quant.scale) * float(weight_quant.scale) / float(output_quant.scale)
     )
     out_shift = round(-math.log2(requantize_scale))
-    if out_shift < 0 or out_shift > 31 or not math.isclose(
-        requantize_scale, 2.0**-out_shift, rel_tol=1e-5, abs_tol=1e-12
+    if (
+        out_shift < 0
+        or out_shift > 31
+        or not math.isclose(
+            requantize_scale, 2.0**-out_shift, rel_tol=1e-5, abs_tol=1e-12
+        )
     ):
         raise ValueError(
             "PULP-NN MVP requantization must be an exact power-of-two right shift; "
@@ -100,9 +102,7 @@ def _get_convolution_replacement(
         )
 
     _, kernel_h, kernel_w, input_channels = weight_ohwi.shape
-    scratch_bytes = (
-        2 * PULP_NUM_CORES * input_channels * kernel_h * kernel_w
-    )
+    scratch_bytes = 2 * PULP_NUM_CORES * input_channels * kernel_h * kernel_w
     return DialectNodeSpec(
         exir_ops.edge.pulp.quantized_conv2d.default,
         (
@@ -114,4 +114,3 @@ def _get_convolution_replacement(
             scratch_bytes,
         ),
     )
-
