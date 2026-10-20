@@ -41,9 +41,9 @@ if(EXECUTORCH_BUILD_PULP)
   )
   target_compile_definitions(pulp_nn PUBLIC NUM_CORES=${PULP_NUM_CORES})
   # Besides being appropriate for PULP-NN, optimization selects the valid
-  # inline-function path in this SDK revision's hal/eu/eu_v3.h. Its
-  # unoptimized fallback macro contains preprocessor directives inside a
-  # continued macro and is rejected by GCC.
+  # inline-function path in this SDK revision's hal/eu/eu_v3.h. Its unoptimized
+  # fallback macro contains preprocessor directives inside a continued macro and
+  # is rejected by GCC.
   target_compile_options(pulp_nn PRIVATE -O3)
   target_include_directories(pulp_nn PUBLIC ${PULP_NN_ROOT}/32bit/include)
   target_include_directories(pulp_nn PRIVATE ${PULP_SDK_INCLUDE_DIRS})

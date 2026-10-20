@@ -50,8 +50,8 @@ From the parent repository, use the Python environment containing this fork's
 ExecuTorch and torchao packages:
 
 ```bash
-python tests/simple_conv2d/generate_cnn_graph.py \
-  --output-dir tests/simple_conv2d
+python tests/pulp-nn_int8_conv2d/generate_cnn_graph.py \
+  --output-dir tests/pulp-nn_int8_conv2d
 ```
 
 The exporter writes `model.pte`, `input.bin`, and `golden.bin`. The PTE exposes
@@ -95,8 +95,8 @@ it does not use L3 or a host filesystem. From the parent repository:
 
 ```bash
 source setup_pulp_open.sh
-python tests/simple_conv2d/generate_cnn_graph.py \
-  --output-dir tests/simple_conv2d
+python tests/pulp-nn_int8_conv2d/generate_cnn_graph.py \
+  --output-dir tests/pulp-nn_int8_conv2d
 
 cmake -S executorch -B build-pulp \
   -DCMAKE_TOOLCHAIN_FILE="$PWD/executorch/backends/pulp/cmake/pulp-open-toolchain.cmake" \
@@ -109,9 +109,95 @@ cmake -S executorch -B build-pulp \
   -DEXECUTORCH_BUILD_EXECUTOR_RUNNER=OFF
 cmake --build build-pulp --target executorch_core pulp_ops_lib
 
-make -C tests/simple_conv2d/runner clean all run
+make -C tests/pulp-nn_int8_conv2d/runner clean all run
 ```
 
 The final line should report `Validation: PASS`. The runner accepts
 `MODEL_DIR` and `EXECUTORCH_BUILD_DIR` overrides if the exported artifacts or
 CMake build are placed elsewhere.
+
+## Bounded dynamic spatial dimensions
+
+The Conv2d kernel supports varying input height and width with a fixed batch of
+one, fixed input/output channel counts and constant weights. In the example,
+height and width independently range from 3 to 8. This is bounded dynamism:
+unbounded shapes, changing rank/batch/channels, and L1 tiling are not implemented.
+
+Preserve the dynamic shape specification in **both** `torch.export.export`
+calls: before PT2E quantization and when re-exporting the converted module.
+Omitting it from the second call specializes the model to the example shape.
+The custom operator's fake implementation computes its output from symbolic
+input dimensions, so these symbols survive the PULP lowering passes.
+
+The standard `ConstraintBasedSymShapeEvalPass` and upper-bound memory planner
+reserve enough L2 activation storage for the largest permitted shapes. No
+custom memory planner is needed for this model. The serialized tensor sizes
+are the upper-bound sizes, while `shape_dynamism=DYNAMIC_BOUND` permits runtime
+resizing within the reserved element capacity. Check `logs/05_memory_plan.info`
+for this distinction. For the 8-input-channel/32-output-channel, maximum 8x8
+example, the activation arena is 2,560 bytes (512 input + 2,048 output), separate
+from weights, runtime metadata, test vectors and the runner's arena capacities.
+The Python graph still retains its symbolic dimensions and range constraints.
+
+### Supplying input data
+
+The PTE describes a computation; it does not contain the next inference's input
+values or discover their shape from raw bytes. The application supplies both:
+
+```cpp
+TensorImpl::SizesType sizes[] = {1, 8, actual_h, actual_w};
+TensorImpl::DimOrderType order[] = {0, 2, 3, 1};
+TensorImpl impl(ScalarType::Byte, 4, sizes, input_data, order);
+Tensor input(&impl);
+// Check both calls' Error results in application code.
+method->set_input(input, 0);
+method->execute();
+```
+
+Logical dimensions are NCHW; the contiguous data buffer is channels-last
+(NHWC bytes). For this model, supply `8 * actual_h * actual_w` quantized uint8
+bytes, not float samples. These are the same raw quantized values accepted by
+the previous static runner. Live float samples need the export's input scale
+and zero point applied before submission. `sizes`, `order`, `impl` and the
+backing bytes must remain alive through the calls. Construct fresh metadata
+for each inference; do not overwrite sizes borrowed from `MethodMeta`.
+
+`set_input` resizes the runtime input tensor and copies the supplied data into
+its planned buffer. (With `alloc_graph_input=False`, the runtime instead shares
+the caller's data.) The PULP kernel computes the current output height and width
+using the convolution formula and calls `resize_tensor(out, ...)`. This updates
+sizes/strides within the same planned storage; it does not allocate a new L2
+activation buffer. It then passes the actual dimensions to PULP-NN. Retrieve
+outputs after every execution; their shape can change and subsequent inference
+reuses their backing storage.
+
+The portable runtime enforces rank, type, layout and total element capacity,
+but does not enforce all original export per-axis ranges. The example runner
+checks height/width limits, batch and channel count explicitly. Production
+applications should do the same before `set_input`.
+
+L1 is managed separately by `pulp_runtime_context.c`: each convolution already
+allocates a block sized for its current input, output, weights and im2col
+scratch, then frees it after execution. The im2col scratch formula depends on
+channels and kernel size, so it stays constant when only H/W change. The
+largest shape must fit available L1 because this backend has no tiling.
+
+### Reproducing the device test
+
+From the parent repository:
+
+```bash
+source setup_pulp_open.sh
+python tests/pulp-nn_int8_conv2d/generate_cnn_graph.py
+cmake --build build-pulp --target pulp_ops_lib
+CCACHE_DISABLE=1 make -C tests/pulp-nn_int8_conv2d/runner all run
+```
+
+The exporter produces one dynamic PTE and 39 input/output cases: maximum,
+minimum, all 36 permitted H/W combinations, then maximum again. `input.bin`
+and `golden.bin` now concatenate those cases; generated `model_io.h` records
+their shapes, byte counts, offsets and allowed bounds. The runner loads the
+method once, iterates the cases, and validates both output shapes and values.
+`INSTRUMENT` and `PRINT_MODEL_IO` remain available in its Makefile USER SECTION.
+Use `--static --output-dir /tmp/pulp-static` to generate a single fixed-shape
+32x32 regression model; pass `MODEL_DIR=/tmp/pulp-static` to the same runner.

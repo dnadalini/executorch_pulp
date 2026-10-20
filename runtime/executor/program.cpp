@@ -8,6 +8,7 @@
 
 #include <executorch/runtime/executor/program.h>
 
+#include <cinttypes>
 #include <cstddef>
 #include <cstdint>
 
@@ -17,6 +18,7 @@
 #include <executorch/runtime/executor/method.h>
 #include <executorch/runtime/executor/program_validation.h>
 #include <executorch/runtime/platform/profiler.h>
+#include <executorch/runtime/platform/runtime_trace.h>
 #include <executorch/schema/extended_header.h>
 #include <executorch/schema/program_generated.h>
 
@@ -74,6 +76,7 @@ Result<executorch_flatbuffer::ExecutionPlan*> get_execution_plan(
     DataLoader* loader,
     Program::Verification verification) {
   EXECUTORCH_SCOPE_PROF("Program::load");
+  ET_TRACE("Program::load: reading PTE header and FlatBuffer\n");
 
   // See if the program size is in the header.
   size_t program_size = 0;
@@ -225,6 +228,13 @@ Result<executorch_flatbuffer::ExecutionPlan*> get_execution_plan(
   // Get the pointer to the root flatbuffer table.
   const executorch_flatbuffer::Program* flatbuffer_program =
       executorch_flatbuffer::GetProgram(program_data->data());
+
+  ET_TRACE(
+      "Program::load: FlatBuffer=%p bytes=%zu segment_base=%zu schema=%u\n",
+      program_data->data(),
+      program_data->size(),
+      segment_base_offset,
+      static_cast<unsigned>(flatbuffer_program->version()));
 
   // The file identifier above ("ET12") is bumped by convention only on a
   // backward-incompatible schema change, so it selects a schema family. The
@@ -389,6 +399,7 @@ Result<Method> Program::load_method(
     const LoadBackendOptionsMap* backend_options,
     Span<const Kernel> kernel_registry) const {
   EXECUTORCH_SCOPE_PROF("Program::load_method");
+  ET_TRACE("Program::load_method: name=%s (find ExecutionPlan)\n", method_name);
   internal::event_tracer_create_event_block(event_tracer, "Default");
   internal::EventTracerProfileMethodScope event_tracer_scope =
       internal::EventTracerProfileMethodScope(

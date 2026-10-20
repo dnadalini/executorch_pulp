@@ -79,6 +79,13 @@ project(executorch
         VERSION "${ET_VERSION_MAJOR}.${ET_VERSION_MINOR}.${ET_VERSION_PATCH}"
 )
 
+option(EXECUTORCH_RUNTIME_TRACE
+       "Print PTE loading, dispatch and tensor metadata" OFF
+)
+if(EXECUTORCH_RUNTIME_TRACE)
+  add_compile_definitions(ET_RUNTIME_TRACE=1)
+endif()
+
 if(WIN32)
   add_compile_definitions(NOMINMAX)
 endif()

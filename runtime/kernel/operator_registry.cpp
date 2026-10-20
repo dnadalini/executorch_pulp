@@ -8,6 +8,7 @@
 
 #include <executorch/runtime/kernel/operator_registry.h>
 
+#include <executorch/runtime/platform/runtime_trace.h>
 #include <cinttypes>
 
 #include <executorch/runtime/platform/assert.h>
@@ -111,6 +112,13 @@ Error register_kernels_internal(const Span<const Kernel> kernels) {
         return Error::RegistrationAlreadyRegistered;
       }
     }
+    ET_TRACE(
+        "register_kernels: slot=%zu name=%s key=%s function=0x%" PRIxPTR "\n",
+        num_registered_kernels,
+        kernel.name_,
+        kernel.kernel_key_.is_fallback() ? "<fallback>"
+                                         : kernel.kernel_key_.data(),
+        reinterpret_cast<uintptr_t>(kernel.op_));
     registered_kernels[num_registered_kernels++] = kernel;
   }
   ET_LOG(
@@ -259,11 +267,22 @@ Result<OpFunction> get_op_function_from_registry(
     return err;
   }
   KernelKey kernel_key = KernelKey(key_string.data());
+  ET_TRACE(
+      "get_op_function_from_registry: name=%s requested_key=%s entries=%zu "
+      "registry=%p\n",
+      name,
+      key_string.data(),
+      kernel_list.size(),
+      static_cast<const void*>(kernel_list.data()));
 
   int32_t fallback_idx = -1;
   for (size_t idx = 0; idx < kernel_list.size(); idx++) {
     if (strcmp(kernel_list[idx].name_, name) == 0) {
       if (kernel_list[idx].kernel_key_ == kernel_key) {
+        ET_TRACE(
+            "  MATCH specialized slot=%zu function=0x%" PRIxPTR "\n",
+            idx,
+            reinterpret_cast<uintptr_t>(kernel_list[idx].op_));
         return kernel_list[idx].op_;
       }
       if (kernel_list[idx].kernel_key_.is_fallback()) {
@@ -272,6 +291,10 @@ Result<OpFunction> get_op_function_from_registry(
     }
   }
   if (fallback_idx != -1) {
+    ET_TRACE(
+        "  MATCH fallback slot=%d function=0x%" PRIxPTR "\n",
+        fallback_idx,
+        reinterpret_cast<uintptr_t>(kernel_list[fallback_idx].op_));
     return kernel_list[fallback_idx].op_;
   }
   ET_LOG(Error, "kernel '%s' not found.", name);

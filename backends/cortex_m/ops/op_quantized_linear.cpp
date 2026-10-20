@@ -7,6 +7,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <executorch/runtime/core/evalue_trace.h>
 #include "cortex_m_ops_common.h"
 
 namespace cortex_m {
@@ -78,6 +79,32 @@ Tensor& quantized_linear_out(
   cmsis_nn_dims bias_dims = {1, 1, 1, out_feat};
   cmsis_nn_dims output_dims = {batches, 1, 1, out_feat};
 
+  ET_TRACE("CMSIS-NN CALL: arm_fully_connected_s8\n");
+  ET_TRACE_TENSOR("input", input);
+  ET_TRACE_TENSOR("weights", weights);
+  if (bias.has_value()) {
+    ET_TRACE_TENSOR("bias", bias.value());
+  }
+  ET_TRACE_TENSOR("output", out);
+  ET_TRACE(
+      "  cmsis input_dims=[%d,%d,%d,%d] filter_dims=[%d,%d,%d,%d] "
+      "output_dims=[%d,%d,%d,%d]\n",
+      input_dims.n,
+      input_dims.h,
+      input_dims.w,
+      input_dims.c,
+      filter_dims.n,
+      filter_dims.h,
+      filter_dims.w,
+      filter_dims.c,
+      output_dims.n,
+      output_dims.h,
+      output_dims.w,
+      output_dims.c);
+  if (kernel_sum.has_value()) {
+    ET_TRACE_TENSOR("kernel_sum", kernel_sum.value());
+  }
+
   arm_cmsis_nn_status status = arm_fully_connected_s8(
       &ctx,
       &fc_params,
@@ -90,6 +117,10 @@ Tensor& quantized_linear_out(
       bias_data,
       &output_dims,
       output_data);
+
+  ET_TRACE(
+      "CMSIS-NN RETURN: arm_fully_connected_s8 status=%d\n",
+      static_cast<int>(status));
 
   if (status != ARM_CMSIS_NN_SUCCESS) {
     ET_LOG(

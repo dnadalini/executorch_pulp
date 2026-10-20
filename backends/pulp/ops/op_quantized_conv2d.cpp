@@ -47,7 +47,7 @@ Tensor& quantized_conv2d_out(
     int64_t scratch_bytes,
     Tensor& out) {
   if (input.dim() != 4 || weight.dim() != 4 || out.dim() != 4 ||
-      input.size(0) != 1 || out.size(0) != 1) {
+      input.size(0) != 1) {
     ET_LOG(
         Error, "pulp::quantized_conv2d expects 4-D tensors and batch size 1");
     context.fail(Error::InvalidArgument);
@@ -79,27 +79,44 @@ Tensor& quantized_conv2d_out(
     return out;
   }
 
-  const int64_t dimensions[] = {
-      input.size(3),
-      input.size(2),
-      input.size(1),
-      out.size(3),
-      out.size(2),
-      out.size(1),
-      weight.size(2),
-      weight.size(1),
-      padding[0],
-      padding[0],
-      padding[1],
-      padding[1],
-      stride[1],
-      stride[0]};
-  for (int64_t dimension : dimensions) {
-    if (!fits_u16(dimension)) {
-      ET_LOG(Error, "pulp::quantized_conv2d dimension exceeds uint16 range");
+  // Spatial dimensions come from the current input, not the serialized
+  // upper-bound output shape (or the shape left by the previous invocation).
+  for (size_t i = 0; i < 4; ++i) {
+    if (input.size(i) <= 0 || !fits_u16(input.size(i)) || weight.size(i) <= 0 ||
+        !fits_u16(weight.size(i))) {
       context.fail(Error::InvalidArgument);
       return out;
     }
+  }
+  if (input.size(1) != weight.size(3) || stride[0] <= 0 || stride[1] <= 0 ||
+      !fits_u16(stride[0]) || !fits_u16(stride[1]) || !fits_u16(padding[0]) ||
+      !fits_u16(padding[1])) {
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+  const int64_t padded_h = input.size(2) + 2 * padding[0];
+  const int64_t padded_w = input.size(3) + 2 * padding[1];
+  if (padded_h < weight.size(1) || padded_w < weight.size(2)) {
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+  const int64_t output_h = (padded_h - weight.size(1)) / stride[0] + 1;
+  const int64_t output_w = (padded_w - weight.size(2)) / stride[1] + 1;
+  if (!fits_u16(output_h) || !fits_u16(output_w)) {
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+  const Tensor::SizesType output_sizes[] = {
+      1,
+      static_cast<Tensor::SizesType>(weight.size(0)),
+      static_cast<Tensor::SizesType>(output_h),
+      static_cast<Tensor::SizesType>(output_w)};
+  const Error resize_error =
+      executorch::runtime::resize_tensor(out, output_sizes);
+  if (resize_error != Error::Ok) {
+    ET_LOG(Error, "pulp::quantized_conv2d could not resize its output");
+    context.fail(resize_error);
+    return out;
   }
 
   const int64_t expected_scratch =

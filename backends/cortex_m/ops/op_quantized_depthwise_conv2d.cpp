@@ -9,6 +9,7 @@
 
 #include <executorch/runtime/core/exec_aten/util/dim_order_util.h>
 
+#include <executorch/runtime/core/evalue_trace.h>
 #include "cortex_m_ops_common.h"
 
 namespace cortex_m {
@@ -271,6 +272,44 @@ static Tensor& quantized_depthwise_conv2d_out_impl(
     return out;
   }
 #endif
+  ET_TRACE(
+      "  conv parameters: stride=[%d,%d] padding=[%d,%d] dilation=[%d,%d] "
+      "activation=[%d,%d]\n",
+      dw_conv_params.stride.h,
+      dw_conv_params.stride.w,
+      dw_conv_params.padding.h,
+      dw_conv_params.padding.w,
+      dw_conv_params.dilation.h,
+      dw_conv_params.dilation.w,
+      dw_conv_params.activation.min,
+      dw_conv_params.activation.max);
+  ET_TRACE("CMSIS-NN CALL: arm_depthwise_conv_wrapper_s8\n");
+  ET_TRACE_TENSOR("input", input);
+  ET_TRACE_TENSOR("weights", weight);
+  if (bias.has_value()) {
+    ET_TRACE_TENSOR("bias", bias.value());
+  }
+  ET_TRACE_TENSOR("output", out);
+  ET_TRACE(
+      "  cmsis input_dims=[%d,%d,%d,%d] filter_dims=[%d,%d,%d,%d] "
+      "output_dims=[%d,%d,%d,%d]\n",
+      input_dims.n,
+      input_dims.h,
+      input_dims.w,
+      input_dims.c,
+      filter_dims.n,
+      filter_dims.h,
+      filter_dims.w,
+      filter_dims.c,
+      output_dims.n,
+      output_dims.h,
+      output_dims.w,
+      output_dims.c);
+  ET_TRACE_TENSOR("scratch", scratch);
+  ET_TRACE_TENSOR("requantize_multipliers", requantize_multipliers);
+  ET_TRACE_TENSOR("requantize_shifts", requantize_shifts);
+  ET_TRACE("  scratch=%p bytes=%d\n", cmsis_context.buf, cmsis_context.size);
+
   const arm_cmsis_nn_status status = arm_depthwise_conv_wrapper_s8(
       &cmsis_context,
       &dw_conv_params,
@@ -283,6 +322,10 @@ static Tensor& quantized_depthwise_conv2d_out_impl(
       bias_data,
       &output_dims,
       output_data);
+
+  ET_TRACE(
+      "CMSIS-NN RETURN: arm_depthwise_conv_wrapper_s8 status=%d\n",
+      static_cast<int>(status));
 
   if (status != ARM_CMSIS_NN_SUCCESS) {
     ET_LOG(

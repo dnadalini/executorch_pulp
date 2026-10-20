@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <executorch/runtime/core/evalue_trace.h>
 #include <executorch/runtime/executor/method.h>
 
 #include <c10/util/irange.h>
@@ -147,6 +148,11 @@ class BackendDelegate final {
       BackendExecutionContext& backend_execution_context,
       Span<EValue*> args) const {
     EXECUTORCH_SCOPE_PROF("delegate_execute");
+    ET_TRACE(
+        "BackendDelegate::Execute: backend=%p handle=%p args=%zu\n",
+        static_cast<const void*>(backend_),
+        static_cast<void*>(handle_),
+        args.size());
     return backend_->execute(backend_execution_context, handle_, args);
   }
 
@@ -264,6 +270,11 @@ Result<InstructionArgs> gen_instruction_arguments(
         static_cast<ssize_t>(arg_idx),
         num_values);
     arg_list[i] = &values[arg_idx];
+    ET_TRACE(
+        "gen_instruction_arguments: arg[%zu] -> value[%" PRId32 "] EValue=%p\n",
+        i,
+        arg_idx,
+        static_cast<void*>(arg_list[i]));
   }
   return InstructionArgs(arg_list, num_args);
 }
@@ -481,6 +492,11 @@ Error Method::parse_values(const NamedDataMap* external_data_map) {
     auto serialization_value = flatbuffer_values->Get(i);
     const auto val = serialization_value->val();
 
+    ET_TRACE(
+        "Method::parse_values: value[%zu] serialized_type=%s\n",
+        i,
+        executorch_flatbuffer::EnumNameKernelTypes(
+            serialization_value->val_type()));
     switch (serialization_value->val_type()) {
       case executorch_flatbuffer::KernelTypes::Null: {
         // Placement new as the list elements are not initialized, so calling
@@ -607,6 +623,21 @@ Error Method::parse_values(const NamedDataMap* external_data_map) {
           return t.error();
         }
         new (&values_[i]) EValue(t.get());
+#if defined(ET_RUNTIME_TRACE) && ET_RUNTIME_TRACE
+        const auto* st = static_cast<const executorch_flatbuffer::Tensor*>(val);
+        ET_TRACE(
+            "  tensor storage: data_buffer_idx=%u shape_dynamism=%s\n",
+            static_cast<unsigned>(st->data_buffer_idx()),
+            executorch_flatbuffer::EnumNameTensorShapeDynamism(
+                st->shape_dynamism()));
+        if (const auto* allocation = st->allocation_info()) {
+          ET_TRACE(
+              "  planned memory_id=%u offset=%" PRIu64 "\n",
+              static_cast<unsigned>(allocation->memory_id()),
+              (static_cast<uint64_t>(allocation->memory_offset_high()) << 32) |
+                  allocation->memory_offset_low());
+        }
+#endif
       } break;
       case executorch_flatbuffer::KernelTypes::TensorList: {
         const auto items =
@@ -686,6 +717,14 @@ Error Method::parse_values(const NamedDataMap* external_data_map) {
     // to clean up an uninitialized entry.
     n_value_ = i + 1;
   }
+#if defined(ET_RUNTIME_TRACE) && ET_RUNTIME_TRACE
+  // Lists can reference later values: inspect only after every value is
+  // initialized.
+  for (size_t i = 0; i < n_value_; ++i) {
+    ET_TRACE("Method::parse_values: initialized value[%zu]\n", i);
+    ET_TRACE_EVALUE(values_[i]);
+  }
+#endif
   return Error::Ok;
 }
 
@@ -753,6 +792,12 @@ Error Method::resolve_operator(
   if (err != Error::Ok) {
     return err;
   }
+
+  ET_TRACE(
+      "Method::resolve_operator: op_index=%" PRId32 " -> %s instruction=%zu\n",
+      op_index,
+      operator_name,
+      kernel_index);
 
   // resolve tensor meta
   // Since temp allocator can be freed, we optimistically
@@ -830,6 +875,9 @@ Error Method::resolve_operator(
     return op_function.error();
   }
   kernels[kernel_index] = op_function.get();
+  ET_TRACE(
+      "Method::resolve_operator: cached function=0x%" PRIxPTR "\n",
+      reinterpret_cast<uintptr_t>(kernels[kernel_index]));
 
   // If we used the temp allocator here, reset it.
   if (allocator == memory_manager_->temp_allocator()) {
@@ -895,6 +943,39 @@ Error Method::init(
   init_state_ =
       InitializationState::InitializationFailed; // Until proven otherwise
   serialization_plan_ = s_plan;
+  ET_TRACE("Method::init: method=%s\n", s_plan->name()->c_str());
+#if defined(ET_RUNTIME_TRACE) && ET_RUNTIME_TRACE
+  // Dump serialized tables before converting them into runtime objects.
+  const auto trace_indices = [](const char* role, const auto* indices) {
+    if (indices) {
+      for (size_t i = 0; i < indices->size(); ++i) {
+        ET_TRACE("  method %s[%zu] -> value[%d]\n", role, i, indices->Get(i));
+      }
+    }
+  };
+  trace_indices("input", s_plan->inputs());
+  trace_indices("output", s_plan->outputs());
+  if (const auto* ops = s_plan->operators()) {
+    for (size_t i = 0; i < ops->size(); ++i) {
+      const auto* op = ops->Get(i);
+      if (op && op->name() && op->overload()) {
+        ET_TRACE(
+            "  operators[%zu]=%s.%s\n",
+            i,
+            op->name()->c_str(),
+            op->overload()->c_str());
+      }
+    }
+  }
+  if (const auto* buffers = s_plan->non_const_buffer_sizes()) {
+    for (size_t i = 0; i < buffers->size(); ++i) {
+      ET_TRACE(
+          "  non_const_buffer_sizes[%zu]=%" PRId64 " bytes\n",
+          i,
+          static_cast<int64_t>(buffers->Get(i)));
+    }
+  }
+#endif
   auto method_allocator = memory_manager_->method_allocator();
 
   {
@@ -956,6 +1037,10 @@ Error Method::init(
 
     for (size_t i = 0; i < n_delegate; ++i) {
       const auto& delegate = *delegates->Get(i);
+      ET_TRACE(
+          "Method::init: delegate[%zu] backend=%s\n",
+          i,
+          delegate.id() ? delegate.id()->c_str() : "<missing>");
 
       // Get per-delegate runtime specs from the LoadBackendOptionsMap if
       // provided
@@ -1008,6 +1093,10 @@ Error Method::init(
           "Missing instructions in chain %" ET_PRIsize_t,
           i);
       auto num_instructions = s_instructions->size();
+      ET_TRACE(
+          "Method::init: chain[%zu] instructions=%zu\n",
+          i,
+          static_cast<size_t>(num_instructions));
       auto chain_instruction_kernels =
           method_allocator->allocateList<OpFunction>(num_instructions);
       if (chain_instruction_kernels == nullptr) {
@@ -1035,6 +1124,12 @@ Error Method::init(
             "Null instruction at index %" ET_PRIsize_t,
             instr_idx);
 
+        ET_TRACE(
+            "Method::init: chain[%zu] instruction[%zu] type=%s\n",
+            i,
+            instr_idx,
+            executorch_flatbuffer::EnumNameInstructionArguments(
+                instruction->instr_args_type()));
         const void* instr_args = instruction->instr_args();
         switch (instruction->instr_args_type()) {
           case executorch_flatbuffer::InstructionArguments::KernelCall: {
@@ -1512,6 +1607,14 @@ Error Method::execute_instruction() {
       (size_t)instructions->size());
 
   auto instruction = instructions->Get(step_state_.instr_idx);
+  ET_TRACE(
+      "Method::execute_instruction: method=%s chain[%zu] instruction[%zu] "
+      "type=%s\n",
+      serialization_plan_->name()->c_str(),
+      step_state_.chain_idx,
+      step_state_.instr_idx,
+      executorch_flatbuffer::EnumNameInstructionArguments(
+          instruction->instr_args_type()));
   size_t next_instr_idx = step_state_.instr_idx + 1;
   Error err = Error::Ok;
 
@@ -1523,7 +1626,37 @@ Error Method::execute_instruction() {
       // TODO(T147221312): Also expose tensor resizer via the context.
       KernelRuntimeContext context(event_tracer_, temp_allocator_);
       auto args = chain.argument_lists_[step_state_.instr_idx];
+#if defined(ET_RUNTIME_TRACE) && ET_RUNTIME_TRACE
+      const auto trace_op_index =
+          instruction->instr_args_as_KernelCall()->op_index();
+      const auto* trace_op =
+          serialization_plan_->operators()->Get(trace_op_index);
+      ET_TRACE(
+          "  CALL op_index=%" PRId32 " %s.%s function=0x%" PRIxPTR "\n",
+          trace_op_index,
+          trace_op->name()->c_str(),
+          trace_op->overload()->c_str(),
+          reinterpret_cast<uintptr_t>(chain.kernels_[step_state_.instr_idx]));
+      for (size_t a = 0; a < args.size(); ++a) {
+        ET_TRACE(
+            "  BEFORE arg[%zu] -> value[%" PRId32 "]\n",
+            a,
+            instruction->instr_args_as_KernelCall()->args()->Get(a));
+        ET_TRACE_EVALUE(*args[a]);
+      }
+#endif
       chain.kernels_[step_state_.instr_idx](context, args);
+#if defined(ET_RUNTIME_TRACE) && ET_RUNTIME_TRACE
+      ET_TRACE(
+          "  RETURN %s.%s status=0x%x\n",
+          trace_op->name()->c_str(),
+          trace_op->overload()->c_str(),
+          static_cast<unsigned>(context.failure_state()));
+      for (size_t a = 0; a < args.size(); ++a) {
+        ET_TRACE("  AFTER arg[%zu]\n", a);
+        ET_TRACE_EVALUE(*args[a]);
+      }
+#endif
       // We reset the temp_allocator after the switch statement
       err = context.failure_state();
       if (err != Error::Ok) {
@@ -1608,6 +1741,10 @@ Error Method::execute_instruction() {
       // We know that index is a valid values_ index because it was checked at
       // init time.
       auto index = jf_call->cond_value_index();
+      ET_TRACE(
+          "  JumpFalseCall: condition=value[%d] false_destination=%d\n",
+          index,
+          jf_call->destination_instruction());
       Result<bool> jf_result = parse_cond_value(values_[index]);
       if (jf_result.ok()) {
         if (!jf_result.get()) {
@@ -1624,6 +1761,10 @@ Error Method::execute_instruction() {
       // We know that instr_args_as_MoveCall is non-null because it was checked
       // at init time.
       auto move_call = instruction->instr_args_as_MoveCall();
+      ET_TRACE(
+          "  MoveCall: value[%d] -> value[%d]\n",
+          move_call->move_from(),
+          move_call->move_to());
       mutable_value(move_call->move_to()) = get_value(move_call->move_from());
     } break;
     case executorch_flatbuffer::InstructionArguments::FreeCall: {
@@ -1633,6 +1774,7 @@ Error Method::execute_instruction() {
       // We know that instr_args_as_FreeCall is non-null because it was checked
       // at init time.
       auto free_call = instruction->instr_args_as_FreeCall();
+      ET_TRACE("  FreeCall: value[%d]\n", free_call->value_index());
       auto t = mutable_value(free_call->value_index()).tryToTensor();
       if (!t.ok()) {
         ET_LOG(
@@ -1651,6 +1793,10 @@ Error Method::execute_instruction() {
           static_cast<uint8_t>(instruction->instr_args_type()));
       err = Error::InvalidProgram;
   }
+  ET_TRACE(
+      "Method::execute_instruction: next=%zu status=0x%x\n",
+      next_instr_idx,
+      static_cast<unsigned>(err));
   // Reset the temp allocator for every instruction.
   if (temp_allocator_ != nullptr) {
     temp_allocator_->reset();
@@ -1765,6 +1911,9 @@ Error Method::execute() {
         "Input %" ET_PRIsize_t " has not been set.",
         i);
   }
+  ET_TRACE(
+      "Method::execute: begin method=%s\n",
+      serialization_plan_->name()->c_str());
   ET_LOG(Debug, "Executing method: %s.", method_meta().name());
   if (temp_allocator_ != nullptr) {
     temp_allocator_->reset();
@@ -1818,6 +1967,10 @@ Error Method::execute() {
   }
   internal::event_tracer_end_profiling_event(event_tracer_, event_tracer_entry);
   log_outputs();
+  ET_TRACE(
+      "Method::execute: end method=%s instructions=%zu\n",
+      serialization_plan_->name()->c_str(),
+      instruction_count);
 
   // TODO(jakeszwe, dbort): Decide on calling execute back to back without
   // going through the reset api first.
