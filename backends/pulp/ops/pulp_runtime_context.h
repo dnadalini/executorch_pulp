@@ -15,6 +15,7 @@ extern "C" {
 typedef struct {
   const uint8_t* input;
   const int8_t* weight;
+  const int32_t* bias;
   uint8_t* output;
   uint16_t input_w;
   uint16_t input_h;

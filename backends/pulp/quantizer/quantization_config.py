@@ -47,6 +47,27 @@ PULP_INT8_WEIGHT_QSPEC = QuantizationSpec(
 
 
 class PulpConvQuantizationConfig(QuantizationConfig):
+    def get_bias_qspec(self, node: Node | None = None) -> QuantizationSpecBase | None:
+        if node is None:
+            return None
+
+        def derive_bias_qparams(obs_or_fqs: list[Any]):
+            input_scale, _ = obs_or_fqs[0].calculate_qparams()
+            weight_scale, _ = obs_or_fqs[1].calculate_qparams()
+            scale = (input_scale * weight_scale).to(torch.float32)
+            return scale, torch.zeros_like(scale, dtype=torch.int32)
+
+        return DerivedQuantizationSpec(
+            derived_from=[(node.args[0], node), (node.args[1], node)],
+            derive_qparams_fn=derive_bias_qparams,
+            dtype=torch.int32,
+            # Float32 Q/DQ cannot represent INT32_MAX; rounding it to 2**31
+            # before conversion can wrap to INT32_MIN. Use representable limits.
+            quant_min=-(2**31) + 256,
+            quant_max=2**31 - 256,
+            qscheme=torch.per_tensor_symmetric,
+        )
+
     def get_output_act_qspec(
         self, node: Node | None = None
     ) -> QuantizationSpecBase | None:

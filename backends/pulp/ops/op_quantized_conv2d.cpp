@@ -7,6 +7,7 @@
 #include <executorch/runtime/kernel/kernel_includes.h>
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include "pulp_runtime_context.h"
@@ -35,15 +36,61 @@ bool fits_u16(int64_t value) {
   return value >= 0 && value <= std::numeric_limits<uint16_t>::max();
 }
 
+bool requantization_shift(const Tensor& scales, int& shift) {
+  // Interpret positive IEEE float32 scales as mantissa * 2**exponent. The FC
+  // must not require floating-point instructions to configure a cluster op.
+  uint32_t mantissa[3];
+  int exponent[3];
+  const auto* bytes = static_cast<const uint8_t*>(scales.const_data_ptr());
+  for (size_t i = 0; i < 3; ++i) {
+    uint32_t bits;
+    std::memcpy(&bits, bytes + i * sizeof(bits), sizeof(bits));
+    const uint32_t encoded_exponent = (bits >> 23) & 0xff;
+    mantissa[i] = bits & 0x7fffff;
+    if ((bits >> 31) || encoded_exponent == 0xff ||
+        (encoded_exponent == 0 && mantissa[i] == 0)) {
+      return false;
+    }
+    exponent[i] = encoded_exponent == 0
+        ? -149
+        : static_cast<int>(encoded_exponent) - 127 - 23;
+    if (encoded_exponent != 0) {
+      mantissa[i] |= 1u << 23;
+    }
+    while (mantissa[i] < (1u << 23)) {
+      mantissa[i] <<= 1;
+      --exponent[i];
+    }
+  }
+  const uint64_t product = static_cast<uint64_t>(mantissa[0]) * mantissa[1];
+  for (int candidate = 0; candidate <= 31; ++candidate) {
+    const int power = exponent[2] - exponent[0] - exponent[1] - candidate;
+    // Normalized mantissas constrain this alignment to at most 25 bits.
+    if (power < 22 || power > 25) {
+      continue;
+    }
+    const uint64_t expected = static_cast<uint64_t>(mantissa[2]) << power;
+    const uint64_t difference =
+        product > expected ? product - expected : expected - product;
+    if (difference <= expected / 100000) {
+      shift = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 Tensor& quantized_conv2d_out(
     KernelRuntimeContext& context,
     const Tensor& input,
     const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
     ArrayRef<int64_t> stride,
     ArrayRef<int64_t> padding,
-    int64_t out_shift,
     int64_t scratch_bytes,
     Tensor& out) {
   if (input.dim() != 4 || weight.dim() != 4 || out.dim() != 4 ||
@@ -70,11 +117,35 @@ Tensor& quantized_conv2d_out(
     context.fail(Error::InvalidArgument);
     return out;
   }
-  if (stride.size() != 2 || padding.size() != 2 || out_shift < 0 ||
-      out_shift > 31 || scratch_bytes < 0) {
+  if (stride.size() != 2 || padding.size() != 2 || scratch_bytes < 0) {
     ET_LOG(
         Error,
         "pulp::quantized_conv2d received invalid convolution parameters");
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+
+  if (scales.scalar_type() != ScalarType::Float || scales.dim() != 1 ||
+      scales.size(0) != 3 || zero_points.scalar_type() != ScalarType::Int ||
+      zero_points.dim() != 1 || zero_points.size(0) != 3 ||
+      (bias.has_value() &&
+       (bias->scalar_type() != ScalarType::Int || bias->dim() != 1 ||
+        bias->size(0) != weight.size(0)))) {
+    ET_LOG(Error, "pulp::quantized_conv2d received invalid bias or qparams");
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+  const int32_t* zp = zero_points.const_data_ptr<int32_t>();
+  for (size_t i = 0; i < 3; ++i) {
+    if (zp[i] != 0) {
+      context.fail(Error::InvalidArgument);
+      return out;
+    }
+  }
+  int out_shift;
+  if (!requantization_shift(scales, out_shift)) {
+    ET_LOG(
+        Error, "pulp::quantized_conv2d requires power-of-two requantization");
     context.fail(Error::InvalidArgument);
     return out;
   }
@@ -131,26 +202,28 @@ Tensor& quantized_conv2d_out(
     return out;
   }
 
-  PulpConv2dArgs args{input.const_data_ptr<uint8_t>(),
-                      weight.const_data_ptr<int8_t>(),
-                      out.mutable_data_ptr<uint8_t>(),
-                      static_cast<uint16_t>(input.size(3)),
-                      static_cast<uint16_t>(input.size(2)),
-                      static_cast<uint16_t>(input.size(1)),
-                      static_cast<uint16_t>(out.size(3)),
-                      static_cast<uint16_t>(out.size(2)),
-                      static_cast<uint16_t>(out.size(1)),
-                      static_cast<uint16_t>(weight.size(2)),
-                      static_cast<uint16_t>(weight.size(1)),
-                      static_cast<uint16_t>(padding[0]),
-                      static_cast<uint16_t>(padding[0]),
-                      static_cast<uint16_t>(padding[1]),
-                      static_cast<uint16_t>(padding[1]),
-                      static_cast<uint16_t>(stride[1]),
-                      static_cast<uint16_t>(stride[0]),
-                      static_cast<uint16_t>(out_shift),
-                      static_cast<size_t>(scratch_bytes),
-                      -1};
+  PulpConv2dArgs args{
+      input.const_data_ptr<uint8_t>(),
+      weight.const_data_ptr<int8_t>(),
+      bias.has_value() ? bias->const_data_ptr<int32_t>() : nullptr,
+      out.mutable_data_ptr<uint8_t>(),
+      static_cast<uint16_t>(input.size(3)),
+      static_cast<uint16_t>(input.size(2)),
+      static_cast<uint16_t>(input.size(1)),
+      static_cast<uint16_t>(out.size(3)),
+      static_cast<uint16_t>(out.size(2)),
+      static_cast<uint16_t>(out.size(1)),
+      static_cast<uint16_t>(weight.size(2)),
+      static_cast<uint16_t>(weight.size(1)),
+      static_cast<uint16_t>(padding[0]),
+      static_cast<uint16_t>(padding[0]),
+      static_cast<uint16_t>(padding[1]),
+      static_cast<uint16_t>(padding[1]),
+      static_cast<uint16_t>(stride[1]),
+      static_cast<uint16_t>(stride[0]),
+      static_cast<uint16_t>(out_shift),
+      static_cast<size_t>(scratch_bytes),
+      -1};
   if (!pulp_runtime_run_conv2d(&args)) {
     ET_LOG(Error, "pulp::quantized_conv2d cluster execution failed");
     context.fail(Error::Internal);

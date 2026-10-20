@@ -22,7 +22,7 @@ static void conv_worker(void* context) {
   pulp_nn_conv_Ho_parallel(
       args->input,
       (uint8_t*)(args + 1),
-      NULL,
+      args->bias,
       args->output,
       args->weight,
       NULL,
@@ -49,15 +49,17 @@ static void conv_worker(void* context) {
 
 static void cluster_conv_entry(void* context) {
   PulpConv2dArgs* fc_args = (PulpConv2dArgs*)context;
-  size_t input_bytes = (size_t)fc_args->input_h * fc_args->input_w *
-      fc_args->input_channels;
+  size_t input_bytes =
+      (size_t)fc_args->input_h * fc_args->input_w * fc_args->input_channels;
   size_t weight_bytes = (size_t)fc_args->kernel_h * fc_args->kernel_w *
       fc_args->input_channels * fc_args->output_channels;
-  size_t output_bytes = (size_t)fc_args->output_h * fc_args->output_w *
-      fc_args->output_channels;
+  size_t output_bytes =
+      (size_t)fc_args->output_h * fc_args->output_w * fc_args->output_channels;
+  size_t bias_bytes =
+      fc_args->bias == NULL ? 0 : sizeof(int32_t) * fc_args->output_channels;
   size_t args_bytes = sizeof(PulpConv2dArgs);
   size_t l1_bytes = args_bytes + fc_args->scratch_bytes + input_bytes +
-      weight_bytes + output_bytes;
+      bias_bytes + weight_bytes + output_bytes;
 
   uint8_t* allocation = (uint8_t*)pi_cl_l1_malloc(0, l1_bytes);
   if (allocation == NULL) {
@@ -68,6 +70,13 @@ static void cluster_conv_entry(void* context) {
   PulpConv2dArgs* cluster_args = (PulpConv2dArgs*)allocation;
   *cluster_args = *fc_args;
   uint8_t* cursor = allocation + args_bytes + fc_args->scratch_bytes;
+  // Bias precedes the byte tensors so all int32 loads remain aligned.
+  cluster_args->bias = NULL;
+  if (bias_bytes != 0) {
+    cluster_args->bias = (const int32_t*)cursor;
+    memcpy(cursor, fc_args->bias, bias_bytes);
+    cursor += bias_bytes;
+  }
   cluster_args->input = cursor;
   memcpy(cursor, fc_args->input, input_bytes);
   cursor += input_bytes;
@@ -103,9 +112,7 @@ void pulp_runtime_shutdown(void) {
   }
 }
 
-int pulp_runtime_is_initialized(void) {
-  return cluster_initialized;
-}
+int pulp_runtime_is_initialized(void) { return cluster_initialized; }
 
 int pulp_runtime_run_conv2d(PulpConv2dArgs* args) {
   struct pi_cluster_task task;

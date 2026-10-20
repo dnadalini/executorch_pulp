@@ -31,10 +31,9 @@ class PulpConv2DCheck(PatternCheck):
             memory_format=torch.channels_last
         ):
             return False
-        bias = node.args[2] if len(node.args) > 2 else None
         dilation = node.args[5] if len(node.args) > 5 else (1, 1)
         groups = node.args[6] if len(node.args) > 6 else 1
-        return bias is None and tuple(dilation) == (1, 1) and groups == 1
+        return tuple(dilation) == (1, 1) and groups == 1
 
     @classmethod
     def check_quantization_config(

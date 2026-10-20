@@ -12,16 +12,49 @@ cluster once and sends every supported operator to it synchronously.
 - static batch size 1;
 - channels-last `uint8` input and output;
 - constant OHWI `int8` weights;
-- zero bias, dilation 1, and groups 1;
+- optional constant `int32` bias, dilation 1, and groups 1;
 - zero point 0 for input, weight, and output;
 - power-of-two requantization using PULP-NN's `out_shift`;
-- the checked-in PULP-NN `32bit/` implementation only.
+- the checked-in PULP-NN `32bit/` implementation with its int32-bias extension.
+
+The lowered graph contains persistent buffers for packed weights, quantized
+bias (when present), and two three-element tensors: `scales` (float32) and
+`zero_points` (int32), ordered `[input, weight, output]`. They are actual
+operator inputs and survive PTE serialization. Buffer names need not match
+CMSIS-NN's generated names. Raw model I/O remains uint8.
+
+PT2E derives the bias scale as `input_scale * weight_scale`, with zero point 0,
+and freezes `round(float_bias / bias_scale)` as int32, one value per output
+channel. Lowering rejects constants whose bias plus dot-product bounds could
+overflow the int32 accumulator. Bias is added before shifting and clipping:
+
+```text
+accumulator = bias_int32[channel] + sum(input_uint8 * weight_int8)
+out_shift = -log2(input_scale * weight_scale / output_scale)
+output_uint8 = clamp(accumulator >> out_shift, 0, 255)
+```
+
+The runtime reads the serialized scales to determine `out_shift`, validates
+that it is a power-of-two right shift in `[0, 31]`, and checks zero points.
+It decodes the float32 buffers with integer arithmetic so the fabric controller
+does not need floating-point instructions or floating-point underflow handling.
+These parameters were previously folded into a scalar shift and discarded;
+their absence from the final graph did not mean quantization was absent.
+Arbitrary scale ratios, nonzero zero points, per-channel scaling, and signed
+activation I/O are still outside this backend's supported quantization contract.
+
+The original PULP-NN kernel reads each bias with `*bias++`, widening **one** int8
+value per output channel; it does not reinterpret four bytes as an int32 bias.
+The opt-in `PULP_NN_INT32_BIAS` build uses separately named convolution/matmul
+symbols with int32 bias loads in both the paired-pixel and leftover-pixel paths.
+Without the define the original int8-bias source ABI is retained.
 
 The quantizer chooses a conservative shift from the accumulator depth. The
 lowering pass verifies that the input/weight/output scale ratio is exactly
 `2^-out_shift`. The runtime passes `out_mult=1`, disables batch normalization
 and ReLU, and therefore uses PULP-NN's plain `clip_u8(accumulator >> out_shift)`
-path. The convolution and accumulation use the PULP-NN 32-bit path; the
+path, with the quantized bias initializing the accumulator. The convolution
+and accumulation use the PULP-NN 32-bit path; the
 `int64_t` types visible in the operator schema are ExecuTorch metadata ABI
 types, not 64-bit convolution arithmetic.
 
@@ -34,11 +67,11 @@ checked again at runtime:
 
 For the 32x8x8 input, 32-output-channel, 3x3 example this is 4,608 bytes.
 The cluster entry point allocates one L1 block for its arguments, scratch,
-input, weights, and output; copies the tensors from L2, executes on eight
-cores, copies the result back to L2, and frees the block. There is no tiling or
-L3 access.
+input, weights, aligned int32 bias, and output; copies the tensors from L2,
+executes on eight cores, copies the result back to L2, and frees the block.
+There is no tiling or L3 access.
 
-Padding is filled with byte zero by the unmodified PULP-NN kernel. In affine
+Padding is filled with byte zero by the PULP-NN padding path. In affine
 quantization, real zero is encoded as the tensor zero point. Requiring zero
 point 0 therefore makes PULP-NN's padding numerically correct. This MVP cannot
 represent negative input activations; a later fused batch-normalization/ReLU
@@ -57,6 +90,11 @@ python tests/pulp-nn_int8_conv2d/generate_cnn_graph.py \
 The exporter writes `model.pte`, `input.bin`, and `golden.bin`. The PTE exposes
 raw quantized `uint8` model I/O and contains one PULP operator, rather than an
 ATen convolution or a delegate segment.
+`logs/quantization_parameters.info` records the actual scales and zero points
+needed to quantize live inputs and interpret raw outputs.
+
+The operator schema now includes bias and qparam tensors. Regenerate PTEs and
+rebuild the runtime together; older PTEs use the previous operator signature.
 
 ## Native build inputs
 
@@ -89,6 +127,21 @@ cmake --build build-pulp --target executorch_core pulp_ops_lib
 ```
 
 ## Siracusa GVSoC runner
+
+The combined script exports a fresh model, configures and rebuilds the runtime
+libraries, then builds and runs the firmware. It stops if any step fails,
+including failures piped through `tee`, so an old PTE cannot be used after an
+export error. It works from any directory and can also be sourced:
+
+```bash
+INSTRUMENT=0 bash tests/pulp-nn_int8_conv2d/generate_model_and_run_on_gvsoc.sh
+```
+
+Omit `INSTRUMENT=0` for verbose tracing. `MODEL_DIR` and
+`EXECUTORCH_BUILD_DIR` can override the output and runtime build directories.
+Logs include both stdout and stderr under `MODEL_DIR/logs/` (by default,
+`tests/pulp-nn_int8_conv2d/logs/`). Sourcing preserves the caller's directory
+and shell options.
 
 The runner embeds the PTE, input, and golden output directly in the L2 image;
 it does not use L3 or a host filesystem. From the parent repository:

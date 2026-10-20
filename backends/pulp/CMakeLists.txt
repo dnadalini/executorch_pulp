@@ -39,7 +39,12 @@ if(EXECUTORCH_BUILD_PULP)
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_matmul.c
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_utils.c
   )
-  target_compile_definitions(pulp_nn PUBLIC NUM_CORES=${PULP_NUM_CORES})
+  if(NOT EXISTS "${PULP_NN_ROOT}/32bit/include/pulp_nn_bias.h")
+    message(FATAL_ERROR "PULP-NN must include the int32-bias extension")
+  endif()
+  target_compile_definitions(
+    pulp_nn PUBLIC NUM_CORES=${PULP_NUM_CORES} PULP_NN_INT32_BIAS
+  )
   # Besides being appropriate for PULP-NN, optimization selects the valid
   # inline-function path in this SDK revision's hal/eu/eu_v3.h. Its unoptimized
   # fallback macro contains preprocessor directives inside a continued macro and

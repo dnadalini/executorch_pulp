@@ -51,8 +51,6 @@ def _get_convolution_replacement(
         _,
         groups,
     ) = node.args
-    if bias is not None:
-        raise ValueError("PULP-NN MVP does not support Conv2d bias")
     if transposed or groups != 1 or tuple(dilation) != (1, 1):
         raise ValueError(
             "PULP-NN MVP supports only regular Conv2d with groups=1 and dilation=1"
@@ -77,9 +75,7 @@ def _get_convolution_replacement(
     if (
         out_shift < 0
         or out_shift > 31
-        or not math.isclose(
-            requantize_scale, 2.0**-out_shift, rel_tol=1e-5, abs_tol=1e-12
-        )
+        or not math.isclose(requantize_scale, 2.0**-out_shift, rel_tol=1e-5)
     ):
         raise ValueError(
             "PULP-NN MVP requantization must be an exact power-of-two right shift; "
@@ -92,13 +88,71 @@ def _get_convolution_replacement(
         raise ValueError("PULP-NN convolution weights must be constant")
     weight_ohwi = weight.permute(0, 2, 3, 1).contiguous()
 
+    bias_tensor = None
+    if bias is not None:
+        bias_tensor = get_param_tensor(exported_program, cast(Node, bias))
+        bias_quant = input_qparams.get(2)
+        if (
+            bias_tensor is None
+            or bias_tensor.dtype != torch.int32
+            or tuple(bias_tensor.shape) != (weight.shape[0],)
+            or bias_quant is None
+            or bias_quant.zp != 0
+            or not math.isclose(
+                float(bias_quant.scale),
+                float(input_quant.scale) * float(weight_quant.scale),
+                rel_tol=1e-5,
+            )
+        ):
+            raise ValueError(
+                "PULP-NN bias must be constant int32 with scale input_scale * weight_scale"
+            )
+        if (bias_tensor <= -(2**31) + 256).any() or (bias_tensor >= 2**31 - 256).any():
+            raise ValueError(
+                "PULP-NN bias exceeds the supported int32 quantization range"
+            )
+
+    # Every partial dot product must fit the native int32 accumulator, including
+    # its initial bias. Use signed bounds rather than a float approximation.
+    weight_i64 = weight.reshape(weight.shape[0], -1).to(torch.int64)
+    initial = bias_tensor.to(torch.int64) if bias_tensor is not None else 0
+    lower = initial + 255 * weight_i64.clamp(max=0).sum(1)
+    upper = initial + 255 * weight_i64.clamp(min=0).sum(1)
+    if (lower < -(2**31)).any() or (upper > 2**31 - 1).any():
+        raise ValueError("PULP-NN bias plus convolution may overflow int32")
+
     with node.graph.inserting_after(cast(Node, weight_node)):
         packed_weight = create_constant_placeholder(
             exported_program,
             node.graph,
             node.name + "_weight_ohwi",
-            InputKind.PARAMETER,
+            InputKind.BUFFER,
             weight_ohwi,
+            persistent_buffer=True,
+        )
+        # These are live operator inputs, so their values survive serialization.
+        scales = create_constant_placeholder(
+            exported_program,
+            node.graph,
+            node.name + "_scales",
+            InputKind.BUFFER,
+            torch.tensor(
+                [
+                    float(input_quant.scale),
+                    float(weight_quant.scale),
+                    float(output_quant.scale),
+                ],
+                dtype=torch.float32,
+            ),
+            persistent_buffer=True,
+        )
+        zero_points = create_constant_placeholder(
+            exported_program,
+            node.graph,
+            node.name + "_zero_points",
+            InputKind.BUFFER,
+            torch.zeros(3, dtype=torch.int32),
+            persistent_buffer=True,
         )
 
     _, kernel_h, kernel_w, input_channels = weight_ohwi.shape
@@ -108,9 +162,11 @@ def _get_convolution_replacement(
         (
             input_node,
             packed_weight,
+            bias,
+            scales,
+            zero_points,
             list(stride),
             list(padding),
-            out_shift,
             scratch_bytes,
         ),
     )

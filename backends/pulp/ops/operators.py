@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -14,12 +15,12 @@ from torch.library import impl, Library, register_fake
 lib = Library("pulp", "DEF")
 
 lib.define(
-    "quantized_conv2d(Tensor input, Tensor weight, int[] stride, int[] padding, "
-    "int out_shift, int scratch_bytes) -> Tensor"
+    "quantized_conv2d(Tensor input, Tensor weight, Tensor? bias, Tensor scales, "
+    "Tensor zero_points, int[] stride, int[] padding, int scratch_bytes) -> Tensor"
 )
 lib.define(
-    "quantized_conv2d.out(Tensor input, Tensor weight, int[] stride, int[] padding, "
-    "int out_shift, int scratch_bytes, *, Tensor(a!) out) -> Tensor(a!)"
+    "quantized_conv2d.out(Tensor input, Tensor weight, Tensor? bias, Tensor scales, "
+    "Tensor zero_points, int[] stride, int[] padding, int scratch_bytes, *, Tensor(a!) out) -> Tensor(a!)"
 )
 
 
@@ -42,12 +43,14 @@ def _output_shape(
 def quantized_conv2d_meta(
     input: torch.Tensor,
     weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
     stride: Sequence[int],
     padding: Sequence[int],
-    out_shift: int,
     scratch_bytes: int,
 ) -> torch.Tensor:
-    del out_shift, scratch_bytes
+    del bias, scales, zero_points, scratch_bytes
     return torch.empty(
         _output_shape(input, weight, stride, padding),
         dtype=torch.uint8,
@@ -60,9 +63,11 @@ def quantized_conv2d_meta(
 def quantized_conv2d_impl(
     input: torch.Tensor,
     weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
     stride: Sequence[int],
     padding: Sequence[int],
-    out_shift: int,
     scratch_bytes: int,
 ) -> torch.Tensor:
     del scratch_bytes
@@ -70,15 +75,46 @@ def quantized_conv2d_impl(
         raise ValueError("PULP-NN convolution expects uint8 input and int8 weight")
     if input.dim() != 4 or weight.dim() != 4 or input.shape[0] != 1:
         raise ValueError("PULP-NN convolution expects 4-D tensors and batch size 1")
+    if (
+        scales.dtype != torch.float32
+        or scales.shape != (3,)
+        or not torch.isfinite(scales).all()
+        or (scales <= 0).any()
+    ):
+        raise ValueError(
+            "PULP-NN scales must be three finite positive float32 values: input, weight, output"
+        )
+    if (
+        zero_points.dtype != torch.int32
+        or zero_points.shape != (3,)
+        or zero_points.any()
+    ):
+        raise ValueError("PULP-NN requires three int32 zero points equal to zero")
+    ratio = float(scales[0]) * float(scales[1]) / float(scales[2])
+    out_shift = round(-math.log2(ratio))
+    if not 0 <= out_shift <= 31 or not math.isclose(
+        ratio, 2.0**-out_shift, rel_tol=1e-5
+    ):
+        raise ValueError(
+            "PULP-NN requires power-of-two requantization with shift in [0, 31]"
+        )
+    if bias is not None and (
+        bias.dtype != torch.int32 or bias.shape != (weight.shape[0],)
+    ):
+        raise ValueError("PULP-NN bias must be int32 with one value per output channel")
 
     weight_oihw = weight.permute(0, 3, 1, 2).contiguous()
     accumulator = F.conv2d(
-        input.to(torch.float32),
-        weight_oihw.to(torch.float32),
+        # float64 represents every int32 dot-product result exactly; float32
+        # loses low bits before the final right shift for large accumulators.
+        input.to(torch.float64),
+        weight_oihw.to(torch.float64),
         bias=None,
         stride=tuple(stride),
         padding=tuple(padding),
-    ).to(torch.int32)
+    ).to(torch.int64)
+    if bias is not None:
+        accumulator += bias.to(torch.int64).reshape(1, -1, 1, 1)
     output = torch.bitwise_right_shift(accumulator, out_shift).clamp(0, 255)
     return output.to(torch.uint8, memory_format=torch.channels_last)
 
@@ -87,15 +123,17 @@ def quantized_conv2d_impl(
 def quantized_conv2d_out_impl(
     input: torch.Tensor,
     weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
     stride: Sequence[int],
     padding: Sequence[int],
-    out_shift: int,
     scratch_bytes: int,
     *,
     out: torch.Tensor,
 ) -> torch.Tensor:
     result = quantized_conv2d_impl(
-        input, weight, stride, padding, out_shift, scratch_bytes
+        input, weight, bias, scales, zero_points, stride, padding, scratch_bytes
     )
     out.resize_(result.shape, memory_format=torch.channels_last)
     out.copy_(result)
