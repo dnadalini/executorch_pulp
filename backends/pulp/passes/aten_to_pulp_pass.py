@@ -170,3 +170,27 @@ def _get_convolution_replacement(
             scratch_bytes,
         ),
     )
+
+
+@AtenToPulpPass.register_dialect_substitution(
+    exir_ops.edge.quantized_decomposed.quantize_per_tensor.default
+)
+def _get_quantize_replacement(
+    node: Node, dialect_pass: AtenToDialectPass
+) -> DialectNodeSpec:
+    del dialect_pass
+    if node.args[5] != torch.uint8:
+        raise ValueError("PULP boundary quantization requires uint8 activations")
+    return DialectNodeSpec(exir_ops.edge.pulp.quantize_per_tensor.default, node.args)
+
+
+@AtenToPulpPass.register_dialect_substitution(
+    exir_ops.edge.quantized_decomposed.dequantize_per_tensor.default
+)
+def _get_dequantize_replacement(
+    node: Node, dialect_pass: AtenToDialectPass
+) -> DialectNodeSpec:
+    del dialect_pass
+    if node.args[5] != torch.uint8:
+        raise ValueError("PULP boundary dequantization requires uint8 activations")
+    return DialectNodeSpec(exir_ops.edge.pulp.dequantize_per_tensor.default, node.args)

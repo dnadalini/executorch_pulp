@@ -9,3 +9,15 @@
   kernels:
     - arg_meta: null
       kernel_name: pulp::quantized_conv2d_out
+
+- func: pulp::quantize_per_tensor.out(Tensor input, float scale, int zero_point, int quant_min, int quant_max, ScalarType dtype, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::quantize_per_tensor_out
+
+- func: pulp::dequantize_per_tensor.out(Tensor input, float scale, int zero_point, int quant_min, int quant_max, ScalarType dtype, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::dequantize_per_tensor_out

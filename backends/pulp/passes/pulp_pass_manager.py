@@ -17,7 +17,6 @@ from torch.export import ExportedProgram
 from torch.export.graph_signature import InputKind
 
 from .aten_to_pulp_pass import AtenToPulpPass
-from .quantized_io_pass import PulpQuantizedIOPass
 
 
 PassClass = Type[ExportPass]
@@ -27,7 +26,6 @@ class _PulpLoweringPass(ExportedProgramPassBase):
     pass_classes: list[PassClass] = [
         FoldAndAnnotateQParamsPass,
         AtenToPulpPass,
-        PulpQuantizedIOPass,
     ]
 
     def call(self, exported_program: ExportedProgram) -> ExportedProgramPassResult:

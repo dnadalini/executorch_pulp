@@ -138,3 +138,76 @@ def quantized_conv2d_out_impl(
     out.resize_(result.shape, memory_format=torch.channels_last)
     out.copy_(result)
     return out
+
+
+# Keep the scalar qparams in the schema, matching PT2E's boundary operators.
+for _name in ("quantize_per_tensor", "dequantize_per_tensor"):
+    _args = "Tensor input, float scale, int zero_point, int quant_min, int quant_max, ScalarType dtype"
+    lib.define(f"{_name}({_args}) -> Tensor")
+    lib.define(f"{_name}.out({_args}, *, Tensor(a!) out) -> Tensor(a!)")
+
+
+def _check_qparams(scale, zero_point, quant_min, quant_max, dtype):
+    if (
+        dtype != torch.uint8
+        or not math.isfinite(scale)
+        or scale <= 0
+        or not 0 <= quant_min <= zero_point <= quant_max <= 255
+    ):
+        raise ValueError("Invalid PULP uint8 quantization parameters")
+
+
+@register_fake("pulp::quantize_per_tensor")
+def quantize_meta(input, scale, zero_point, quant_min, quant_max, dtype):
+    return torch.empty_like(input, dtype=dtype)
+
+
+@register_fake("pulp::dequantize_per_tensor")
+def dequantize_meta(input, scale, zero_point, quant_min, quant_max, dtype):
+    return torch.empty_like(input, dtype=torch.float32)
+
+
+@impl(lib, "quantize_per_tensor", "CompositeExplicitAutograd")
+def quantize_impl(input, scale, zero_point, quant_min, quant_max, dtype):
+    _check_qparams(scale, zero_point, quant_min, quant_max, dtype)
+    if input.dtype != torch.float32:
+        raise ValueError("PULP quantization expects float32 input")
+    return (
+        (torch.round(input * (1.0 / scale)) + zero_point)
+        .clamp(quant_min, quant_max)
+        .to(dtype)
+    )
+
+
+@impl(lib, "dequantize_per_tensor", "CompositeExplicitAutograd")
+def dequantize_impl(input, scale, zero_point, quant_min, quant_max, dtype):
+    _check_qparams(scale, zero_point, quant_min, quant_max, dtype)
+    if input.dtype != dtype:
+        raise ValueError("PULP dequantization expects uint8 input")
+    return (input.to(torch.float32) - zero_point) * scale
+
+
+@impl(lib, "quantize_per_tensor.out", "CompositeExplicitAutograd")
+def quantize_out(input, scale, zero_point, quant_min, quant_max, dtype, *, out):
+    result = quantize_impl(input, scale, zero_point, quant_min, quant_max, dtype)
+    out.resize_(
+        result.shape,
+        memory_format=(
+            torch.contiguous_format if result.dim() != 4 else torch.channels_last
+        ),
+    )
+    out.copy_(result)
+    return out
+
+
+@impl(lib, "dequantize_per_tensor.out", "CompositeExplicitAutograd")
+def dequantize_out(input, scale, zero_point, quant_min, quant_max, dtype, *, out):
+    result = dequantize_impl(input, scale, zero_point, quant_min, quant_max, dtype)
+    out.resize_(
+        result.shape,
+        memory_format=(
+            torch.contiguous_format if result.dim() != 4 else torch.channels_last
+        ),
+    )
+    out.copy_(result)
+    return out

@@ -55,7 +55,13 @@ if(EXECUTORCH_BUILD_PULP)
 
   set(_pulp_kernel_sources
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_conv2d.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
+  )
+  # Boundary conversions run on the FC, which has no floating-point unit.
+  set_source_files_properties(
+    ops/op_quantize_per_tensor.cpp PROPERTIES COMPILE_OPTIONS
+                                              "-march=rv32imc_xpulpv3"
   )
   add_library(pulp_kernels ${_pulp_kernel_sources})
   target_compile_definitions(pulp_kernels PRIVATE NUM_CORES=${PULP_NUM_CORES})

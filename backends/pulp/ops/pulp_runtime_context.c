@@ -19,6 +19,10 @@ static int cluster_initialized = 0;
 
 static void conv_worker(void* context) {
   PulpConv2dArgs* args = (PulpConv2dArgs*)context;
+
+  printf("Running Conv2d on Core %d; MemAddr: Input = 0x%x, weights = 0x%x, output = 0x%x\n", 
+      pi_core_id(), (unsigned int)args->input, (unsigned int)args->weight, (unsigned int)args->output);
+
   pulp_nn_conv_Ho_parallel(
       args->input,
       (uint8_t*)(args + 1),

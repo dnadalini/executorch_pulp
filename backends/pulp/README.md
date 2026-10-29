@@ -2,8 +2,9 @@
 
 This backend adds PULP-NN operators directly to the ExecuTorch operator
 registry. It is an optimized-kernel integration, not an ExecuTorch delegate.
-The ExecuTorch method runs on the fabric controller (FC); the runtime opens the
-cluster once and sends every supported operator to it synchronously.
+The ExecuTorch method runs on the fabric controller (FC). Boundary conversions
+run on the FC using software floating point; the runtime opens the cluster once
+and sends supported convolutions to it synchronously.
 
 ## Conv2d MVP
 
@@ -21,7 +22,16 @@ The lowered graph contains persistent buffers for packed weights, quantized
 bias (when present), and two three-element tensors: `scales` (float32) and
 `zero_points` (int32), ordered `[input, weight, output]`. They are actual
 operator inputs and survive PTE serialization. Buffer names need not match
-CMSIS-NN's generated names. Raw model I/O remains uint8.
+CMSIS-NN's generated names. Public model I/O is FP32. Lowering preserves boundary
+conversions and emits `pulp::quantize_per_tensor` and
+`pulp::dequantize_per_tensor`, surrounding the UINT8 convolution. Folded Q/DQ
+pairs between supported quantized operators remain folded; weights and bias
+are still quantized ahead of time.
+
+Quantization uses round-to-nearest-even and clips to the exported UINT8 range;
+dequantization computes `(q - zero_point) * scale`. Negative FP32 inputs are
+accepted but saturate to zero under this backend's zero-point-zero UINT8
+contract. FP32 boundaries do not expand the convolution's supported range.
 
 PT2E derives the bias scale as `input_scale * weight_scale`, with zero point 0,
 and freezes `round(float_bias / bias_scale)` as int32, one value per output
@@ -88,10 +98,12 @@ python tests/pulp-nn_int8_conv2d/generate_cnn_graph.py \
 ```
 
 The exporter writes `model.pte`, `input.bin`, and `golden.bin`. The PTE exposes
-raw quantized `uint8` model I/O and contains one PULP operator, rather than an
-ATen convolution or a delegate segment.
+FP32 model I/O and contains three PULP operators: quantize, quantized convolution,
+and dequantize, rather than an ATen convolution or a delegate segment.
 `logs/quantization_parameters.info` records the actual scales and zero points
-needed to quantize live inputs and interpret raw outputs.
+used by the on-device conversions. `input.bin` and `golden.bin` contain FP32
+NHWC data. The runner compares floats with a small absolute tolerance (1e-5
+output quantization steps, at least 1e-6), rejecting nonfinite outputs.
 
 The operator schema now includes bias and qparam tensors. Regenerate PTEs and
 rebuild the runtime together; older PTEs use the previous operator signature.
@@ -186,10 +198,11 @@ The standard `ConstraintBasedSymShapeEvalPass` and upper-bound memory planner
 reserve enough L2 activation storage for the largest permitted shapes. No
 custom memory planner is needed for this model. The serialized tensor sizes
 are the upper-bound sizes, while `shape_dynamism=DYNAMIC_BOUND` permits runtime
-resizing within the reserved element capacity. Check `logs/05_memory_plan.info`
+resizing within the reserved element capacity. Check `logs/04_memory_plan.info`
 for this distinction. For the 8-input-channel/32-output-channel, maximum 8x8
-example, the activation arena is 2,560 bytes (512 input + 2,048 output), separate
-from weights, runtime metadata, test vectors and the runner's arena capacities.
+example, the activation arena includes FP32 boundary tensors and UINT8
+intermediates, separate from weights, runtime metadata, test vectors and the
+runner's arena capacities.
 The Python graph still retains its symbolic dimensions and range constraints.
 
 ### Supplying input data
@@ -200,7 +213,7 @@ values or discover their shape from raw bytes. The application supplies both:
 ```cpp
 TensorImpl::SizesType sizes[] = {1, 8, actual_h, actual_w};
 TensorImpl::DimOrderType order[] = {0, 2, 3, 1};
-TensorImpl impl(ScalarType::Byte, 4, sizes, input_data, order);
+TensorImpl impl(ScalarType::Float, 4, sizes, input_data, order);
 Tensor input(&impl);
 // Check both calls' Error results in application code.
 method->set_input(input, 0);
@@ -208,10 +221,9 @@ method->execute();
 ```
 
 Logical dimensions are NCHW; the contiguous data buffer is channels-last
-(NHWC bytes). For this model, supply `8 * actual_h * actual_w` quantized uint8
-bytes, not float samples. These are the same raw quantized values accepted by
-the previous static runner. Live float samples need the export's input scale
-and zero point applied before submission. `sizes`, `order`, `impl` and the
+(NHWC bytes). For this model, supply `8 * actual_h * actual_w` FP32 samples
+(`4 * 8 * actual_h * actual_w` bytes). The model applies its exported input
+scale and zero point on-device and returns FP32 outputs. `sizes`, `order`, `impl` and the
 backing bytes must remain alive through the calls. Construct fresh metadata
 for each inference; do not overwrite sizes borrowed from `MethodMeta`.
 

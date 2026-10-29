@@ -43,14 +43,14 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
         reference = edge.exported_program().module()
         # Exercise sizes above the export example, shrink, grow and odd shapes.
         for h, w in ((8, 8), (3, 3), (3, 8), (8, 3), (5, 7), (8, 8)):
-            raw = torch.randint(0, 256, (1, 32, h, w), dtype=torch.uint8)
+            raw = torch.rand(1, 32, h, w)
             raw = raw.contiguous(memory_format=torch.channels_last)
             output = reference(raw)
             self.assertEqual(tuple(output.shape), (1, 32, h, w))
             self.assertTrue(output.is_contiguous(memory_format=torch.channels_last))
         with self.assertRaises(RuntimeError):
             reference(
-                torch.zeros(1, 32, 2, 8, dtype=torch.uint8).contiguous(
+                torch.zeros(1, 32, 2, 8, dtype=torch.float32).contiguous(
                     memory_format=torch.channels_last
                 )
             )
@@ -61,7 +61,22 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
             tensor = plan.values[value_index].val
             self.assertEqual(tensor.shape_dynamism, TensorShapeDynamism.DYNAMIC_BOUND)
             self.assertEqual(tensor.sizes, [1, 32, 8, 8])
+            self.assertEqual(int(tensor.scalar_type), 6)  # FP32 boundary
         self.assertTrue(program.buffer)
+
+    def test_boundary_rounding_saturation_and_resize(self) -> None:
+        # Exact half-way inputs distinguish nearest-even from truncation or
+        # round-away-from-zero. Include clipping at both ends of UINT8.
+        values = torch.tensor([-1.0, 0.0, 0.125, 0.375, 0.625, 63.625, 64.0, 100.0])
+        expected = torch.tensor([0, 0, 0, 2, 2, 254, 255, 255], dtype=torch.uint8)
+        quantized = torch.empty(0, dtype=torch.uint8)
+        restored = torch.empty(0, dtype=torch.float32)
+        for count in (8, 3, 8):
+            args = (0.25, 0, 0, 255, torch.uint8)
+            torch.ops.pulp.quantize_per_tensor.out(values[:count], *args, out=quantized)
+            torch.testing.assert_close(quantized, expected[:count])
+            torch.ops.pulp.dequantize_per_tensor.out(quantized, *args, out=restored)
+            torch.testing.assert_close(restored, expected[:count].float() * 0.25)
 
     def test_out_reference_resizes_between_invocations(self) -> None:
         weight = torch.ones(32, 3, 3, 8, dtype=torch.int8)
@@ -139,10 +154,12 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
         ).to(torch.int32)
         torch.testing.assert_close(bias, expected_bias)
         raw_input = torch.arange(32 * 8 * 8, dtype=torch.int32).remainder(256)
-        raw_input = raw_input.to(torch.uint8).reshape(1, 32, 8, 8)
+        raw_input = (raw_input.to(torch.float32) - 16.5).reshape(1, 32, 8, 8) * scales[
+            0
+        ]
         raw_input = raw_input.contiguous(memory_format=torch.channels_last)
         output = edge.exported_program().module()(raw_input)
-        self.assertEqual(output.dtype, torch.uint8)
+        self.assertEqual(output.dtype, torch.float32)
         self.assertEqual(tuple(output.shape), (1, 32, 8, 8))
         self.assertTrue(output.is_contiguous(memory_format=torch.channels_last))
 
@@ -150,14 +167,27 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
         # the right shift. Exercise negative weights/bias as well as saturation.
         weight = state[targets[conv.args[1].name]].permute(0, 3, 1, 2).to(torch.int64)
         patches = torch.nn.functional.unfold(
-            raw_input.to(torch.float64), 3, padding=1
+            torch.round(raw_input * (1.0 / float(scales[0])))
+            .clamp(0, 255)
+            .to(torch.float64),
+            3,
+            padding=1,
         ).to(torch.int64)
         accumulators = weight.flatten(1) @ patches[0] + bias.to(torch.int64)[:, None]
         shift = round(-torch.log2(scales[0] * scales[1] / scales[2]).item())
         expected = (
             (accumulators >> shift).clamp(0, 255).to(torch.uint8).reshape_as(output)
         )
-        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(output, expected.to(torch.float32) * scales[2])
+        program = edge.to_executorch()
+        self.assertEqual(
+            [op.name for op in program.executorch_program.execution_plan[0].operators],
+            [
+                "pulp::quantize_per_tensor",
+                "pulp::quantized_conv2d",
+                "pulp::dequantize_per_tensor",
+            ],
+        )
 
     def test_bias_precision_saturation_and_live_scales(self) -> None:
         raw = torch.ones(1, 1, 3, 5, dtype=torch.uint8).contiguous(
