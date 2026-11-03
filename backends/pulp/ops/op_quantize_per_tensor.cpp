@@ -54,15 +54,15 @@ Tensor& quantize_per_tensor_out(
   const float* src = input.const_data_ptr<float>();
   uint8_t* dst = out.mutable_data_ptr<uint8_t>();
 
-  printf(
-      "[quantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld "
-      "qmax=%ld\n",
-      static_cast<const void*>(src),
-      static_cast<void*>(dst),
-      scale,
-      zp,
-      qmin,
-      qmax);
+  // printf(
+  //     "[quantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld "
+  //     "qmax=%ld\n",
+  //     static_cast<const void*>(src),
+  //     static_cast<void*>(dst),
+  //     scale,
+  //     zp,
+  //     qmin,
+  //     qmax);
 
   for (size_t i = 0; i < input.numel(); ++i) {
     const float value = src[i] * inverse_scale;
@@ -106,15 +106,15 @@ Tensor& dequantize_per_tensor_out(
   const uint8_t* src = input.const_data_ptr<uint8_t>();
   float* dst = out.mutable_data_ptr<float>();
 
-  printf(
-      "[dequantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld "
-      "qmax=%ld\n",
-      static_cast<const void*>(src),
-      static_cast<void*>(dst),
-      scale,
-      zp,
-      qmin,
-      qmax);
+  // printf(
+  //     "[dequantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld "
+  //     "qmax=%ld\n",
+  //     static_cast<const void*>(src),
+  //     static_cast<void*>(dst),
+  //     scale,
+  //     zp,
+  //     qmin,
+  //     qmax);
 
   for (size_t i = 0; i < input.numel(); ++i) {
     dst[i] = (static_cast<int32_t>(src[i]) - static_cast<int32_t>(zp)) *

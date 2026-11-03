@@ -250,9 +250,7 @@ class BroadcastIndexesIterator<1, false> {
 
   BroadcastIndexesIterator() = default;
 
-  explicit BroadcastIndexesIterator(
-      [[maybe_unused]] const Tensor& output,
-      [[maybe_unused]] const Tensor& input) {}
+  explicit BroadcastIndexesIterator(const Tensor&, const Tensor&) {}
 
   struct make_end_t {
     explicit constexpr make_end_t() = default;

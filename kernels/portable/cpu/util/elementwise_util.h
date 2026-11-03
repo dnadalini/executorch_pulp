@@ -167,19 +167,19 @@ inline void dtype_specialized_elementwise_fn_impl(
   }
 #endif // ET_USE_PYTORCH_HEADERS
 
+  std::array<const CTYPE_COMPUTE*, kNumInputs> inputs_data_ptrs = {
+      inputs.first->template const_data_ptr<CTYPE_COMPUTE>()...};
+  const auto range =
+      BroadcastIndexesRange<kNumInputs, support_noncontiguous_tensors>(
+          out, (*inputs.first)...);
+
   ::executorch::extension::parallel_for(
       0,
       out.numel(),
       ::executorch::extension::internal::GRAIN_SIZE,
       [&](const auto begin, const auto end) {
-        std::array<const CTYPE_COMPUTE*, kNumInputs> inputs_data_ptrs = {
-            inputs.first->template const_data_ptr<CTYPE_COMPUTE>()...};
-
         CTYPE_OUT* const data_out = out.mutable_data_ptr<CTYPE_OUT>();
 
-        const auto range =
-            BroadcastIndexesRange<kNumInputs, support_noncontiguous_tensors>(
-                out, (*inputs.first)...);
         auto begin_it = range.begin();
         begin_it += begin;
         for (; (*begin_it)[0] < end; ++begin_it) {

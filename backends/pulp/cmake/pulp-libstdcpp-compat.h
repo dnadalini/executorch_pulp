@@ -17,6 +17,7 @@ using ::lgamma;
 using ::log1p;
 using ::log2;
 using ::nearbyint;
+using ::round;
 using ::trunc;
 } // namespace std
 #endif
