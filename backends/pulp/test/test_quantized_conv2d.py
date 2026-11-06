@@ -22,6 +22,35 @@ class _Conv(torch.nn.Module):
 
 
 class TestPulpQuantizedConv2d(unittest.TestCase):
+    def test_depthwise_convolution_remains_float_in_hybrid_graph(self) -> None:
+        class Hybrid(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.pointwise = torch.nn.Conv2d(8, 8, 1)
+                self.depthwise = torch.nn.Conv2d(8, 8, 3, padding=1, groups=8)
+
+            def forward(self, x):
+                return self.depthwise(self.pointwise(x))
+
+        example = torch.rand(1, 8, 5, 5).contiguous(memory_format=torch.channels_last)
+        exported = torch.export.export(Hybrid().eval(), (example,))
+        prepared = prepare_pt2e(exported.module(), PulpQuantizer())
+        prepared(example)
+        converted = convert_pt2e(prepared)
+        edge = to_edge(
+            torch.export.export(converted, (example,)),
+            compile_config=pulp_edge_compile_config(),
+        )
+        expected = edge.exported_program().module()(example)
+        edge = edge.transform(PulpPassManager())
+        targets = [str(node.target) for node in edge.exported_program().graph.nodes]
+        self.assertEqual(sum("pulp.quantized_conv2d" in name for name in targets), 1)
+        self.assertEqual(sum("aten.convolution" in name for name in targets), 1)
+        actual = edge.exported_program().module()(example)
+        self.assertEqual(actual.shape, expected.shape)
+        self.assertTrue(torch.isfinite(actual).all())
+        self.assertTrue(edge.to_executorch().buffer)
+
     def test_bounded_spatial_shapes_survive_lowering_and_serialization(self) -> None:
         torch.manual_seed(0)
         example = torch.rand(1, 32, 6, 7).to(memory_format=torch.channels_last)

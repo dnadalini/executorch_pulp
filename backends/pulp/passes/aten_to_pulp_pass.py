@@ -35,6 +35,10 @@ class AtenToPulpPass(AtenToDialectPass):
 def _get_convolution_replacement(
     node: Node, dialect_pass: AtenToDialectPass
 ) -> DialectNodeSpec | None:
+    # Unsupported convolutions (e.g. MobileNet's depthwise layers) remain
+    # floating point and have no folded qparams. Leave them for portable kernels.
+    if not node.meta.get("input_qparams") or not node.meta.get("output_qparams"):
+        return None
     input_qparams = get_input_qparams(node)
     output_qparams = get_output_qparams(node)
     if 0 not in input_qparams or 1 not in input_qparams or not output_qparams:

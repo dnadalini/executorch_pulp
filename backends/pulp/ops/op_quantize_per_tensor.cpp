@@ -55,10 +55,8 @@ Tensor& quantize_per_tensor_out(
   uint8_t* dst = out.mutable_data_ptr<uint8_t>();
 
   // printf(
-  //     "[quantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld "
-  //     "qmax=%ld\n",
-  //     static_cast<const void*>(src),
-  //     static_cast<void*>(dst),
+  //     "[quantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld
+  //     " "qmax=%ld\n", static_cast<const void*>(src), static_cast<void*>(dst),
   //     scale,
   //     zp,
   //     qmin,
@@ -107,9 +105,8 @@ Tensor& dequantize_per_tensor_out(
   float* dst = out.mutable_data_ptr<float>();
 
   // printf(
-  //     "[dequantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld "
-  //     "qmax=%ld\n",
-  //     static_cast<const void*>(src),
+  //     "[dequantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld
+  //     qmin=%ld " "qmax=%ld\n", static_cast<const void*>(src),
   //     static_cast<void*>(dst),
   //     scale,
   //     zp,
