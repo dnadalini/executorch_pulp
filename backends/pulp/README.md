@@ -87,6 +87,44 @@ point 0 therefore makes PULP-NN's padding numerically correct. This MVP cannot
 represent negative input activations; a later fused batch-normalization/ReLU
 path can naturally preserve this unsigned activation contract.
 
+## Depthwise Conv2d
+
+`pulp::quantized_depthwise_conv2d` supports multiplier 1
+(`groups == input_channels == output_channels`), dilation 1, batch size 1,
+contiguous OIHW int8 weights, and the same quantization and int32-bias contract
+as standard convolution. Single-channel groups-1 convolutions use the standard
+operator. Other grouped convolutions and depth multipliers remain unsupported.
+
+External activation tensors retain logical NCHW shapes and channels-last
+storage. The cluster entry converts the HWC input to CHW planes in L1 before
+calling `pulp_nn_depthwise_generic`; the kernel writes HWC output directly.
+The patched generic kernel uses bounded patch gathers and four-element dot
+products, including scalar tails for small or non-multiple-of-four kernels.
+The opt-in int32-bias symbol is `pulp_nn_depthwise_generic_i32_bias`.
+
+Depthwise scratch is derived at runtime from current dimensions rather than
+serialized in the operator arguments:
+
+```text
+NUM_CORES * round_up(K_H * K_W, 4) bytes
+```
+
+One L1 arena contains the arguments, per-core scratch, aligned bias, CHW input,
+OIHW weights, and HWC output. Weight storage is `OUT_CH * K_H * K_W` bytes.
+The full arena must fit L1; tiling is not implemented. The wrapper reports an
+execution failure if allocation fails. Spatial shapes can vary within the
+exported bounds, and the C++ operator resizes its output on each invocation.
+
+Run the reference, lowering/serialization, and host C runtime/kernel tests:
+
+```bash
+python -m unittest executorch.backends.pulp.test.test_quantized_depthwise \
+  executorch.backends.pulp.test.test_quantized_conv2d
+```
+
+The host tests substitute SDK scheduling and PULP intrinsics; they do not
+replace device or GVSoC validation.
+
 ## Export
 
 From the parent repository, use the Python environment containing this fork's

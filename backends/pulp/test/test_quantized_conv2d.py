@@ -22,7 +22,7 @@ class _Conv(torch.nn.Module):
 
 
 class TestPulpQuantizedConv2d(unittest.TestCase):
-    def test_depthwise_convolution_remains_float_in_hybrid_graph(self) -> None:
+    def test_depthwise_convolution_lowers_in_hybrid_graph(self) -> None:
         class Hybrid(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -45,7 +45,10 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
         edge = edge.transform(PulpPassManager())
         targets = [str(node.target) for node in edge.exported_program().graph.nodes]
         self.assertEqual(sum("pulp.quantized_conv2d" in name for name in targets), 1)
-        self.assertEqual(sum("aten.convolution" in name for name in targets), 1)
+        self.assertEqual(
+            sum("pulp.quantized_depthwise_conv2d" in name for name in targets), 1
+        )
+        self.assertEqual(sum("aten.convolution" in name for name in targets), 0)
         actual = edge.exported_program().module()(example)
         self.assertEqual(actual.shape, expected.shape)
         self.assertTrue(torch.isfinite(actual).all())

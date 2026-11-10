@@ -36,10 +36,16 @@ typedef struct {
   int status;
 } PulpConv2dArgs;
 
+// Platform initialization
 int pulp_runtime_initialize(void);
 void pulp_runtime_shutdown(void);
 int pulp_runtime_is_initialized(void);
+
+// Convolution workers
 int pulp_runtime_run_conv2d(PulpConv2dArgs* args);
+// Multiplier-1 depthwise: external HWC activations, OIHW weights.
+// Converts input to CHW and derives scratch_bytes internally.
+int pulp_runtime_run_depthwise_conv2d(PulpConv2dArgs* args);
 
 #ifdef __cplusplus
 }

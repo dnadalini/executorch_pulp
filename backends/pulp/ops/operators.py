@@ -22,6 +22,19 @@ lib.define(
     "quantized_conv2d.out(Tensor input, Tensor weight, Tensor? bias, Tensor scales, "
     "Tensor zero_points, int[] stride, int[] padding, int scratch_bytes, *, Tensor(a!) out) -> Tensor(a!)"
 )
+lib.define(
+    "quantized_depthwise_conv2d(Tensor input, Tensor weight, Tensor? bias, Tensor scales, "
+    "Tensor zero_points, int[] stride, int[] padding) -> Tensor"
+)
+lib.define(
+    "quantized_depthwise_conv2d.out(Tensor input, Tensor weight, Tensor? bias, Tensor scales, "
+    "Tensor zero_points, int[] stride, int[] padding, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+######################
+### CONV2D Support ###
+######################
 
 
 def _output_shape(
@@ -139,6 +152,137 @@ def quantized_conv2d_out_impl(
     out.copy_(result)
     return out
 
+
+#########################
+### Depthwise Support ###
+#########################
+
+
+def _depthwise_output_shape(input, weight, stride, padding):
+    batch, _, input_h, input_w = input.shape
+    output_channels, _, kernel_h, kernel_w = weight.shape
+    stride_h, stride_w = stride
+    pad_h, pad_w = padding
+    output_h = (input_h + 2 * pad_h - kernel_h) // stride_h + 1
+    output_w = (input_w + 2 * pad_w - kernel_w) // stride_w + 1
+    return batch, output_channels, output_h, output_w
+
+
+@register_fake("pulp::quantized_depthwise_conv2d")
+def quantized_depthwise_conv2d_meta(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
+    stride: Sequence[int],
+    padding: Sequence[int],
+) -> torch.Tensor:
+    del bias, scales, zero_points
+    return torch.empty(
+        _depthwise_output_shape(input, weight, stride, padding),
+        dtype=torch.uint8,
+        device=input.device,
+        memory_format=torch.channels_last,
+    )
+
+
+@impl(lib, "quantized_depthwise_conv2d", "CompositeExplicitAutograd")
+def quantized_depthwise_conv2d_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
+    stride: Sequence[int],
+    padding: Sequence[int],
+) -> torch.Tensor:
+    if input.dtype != torch.uint8 or weight.dtype != torch.int8:
+        raise ValueError("PULP-NN convolution expects uint8 input and int8 weight")
+    if input.dim() != 4 or weight.dim() != 4 or input.shape[0] != 1:
+        raise ValueError("PULP-NN convolution expects 4-D tensors and batch size 1")
+    if weight.shape[0] != input.shape[1] or weight.shape[1] != 1:
+        raise ValueError("PULP-NN depthwise convolution requires multiplier 1")
+    if (
+        len(stride) != 2
+        or len(padding) != 2
+        or any(s <= 0 for s in stride)
+        or any(p < 0 for p in padding)
+    ):
+        raise ValueError("PULP-NN received invalid convolution parameters")
+    if (
+        scales.dtype != torch.float32
+        or scales.shape != (3,)
+        or not torch.isfinite(scales).all()
+        or (scales <= 0).any()
+    ):
+        raise ValueError(
+            "PULP-NN scales must be three finite positive float32 values: input, weight, output"
+        )
+    if (
+        zero_points.dtype != torch.int32
+        or zero_points.shape != (3,)
+        or zero_points.any()
+    ):
+        raise ValueError("PULP-NN requires three int32 zero points equal to zero")
+    ratio = float(scales[0]) * float(scales[1]) / float(scales[2])
+    out_shift = round(-math.log2(ratio))
+    if not 0 <= out_shift <= 31 or not math.isclose(
+        ratio, 2.0**-out_shift, rel_tol=1e-5
+    ):
+        raise ValueError(
+            "PULP-NN requires power-of-two requantization with shift in [0, 31]"
+        )
+    if bias is not None and (
+        bias.dtype != torch.int32 or bias.shape != (weight.shape[0],)
+    ):
+        raise ValueError("PULP-NN bias must be int32 with one value per output channel")
+
+    accumulator = F.conv2d(
+        # float64 represents every int32 dot-product result exactly; float32
+        # loses low bits before the final right shift for large accumulators.
+        input.to(torch.float64),
+        weight.to(torch.float64),
+        bias=None,
+        stride=tuple(stride),
+        padding=tuple(padding),
+        groups=input.shape[1],
+    ).to(torch.int64)
+    if bias is not None:
+        accumulator += bias.to(torch.int64).reshape(1, -1, 1, 1)
+    output = torch.bitwise_right_shift(accumulator, out_shift).clamp(0, 255)
+    return output.to(torch.uint8, memory_format=torch.channels_last)
+
+
+@impl(lib, "quantized_depthwise_conv2d.out", "CompositeExplicitAutograd")
+def quantized_depthwise_conv2d_out_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
+    stride: Sequence[int],
+    padding: Sequence[int],
+    *,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    result = quantized_depthwise_conv2d_impl(
+        input,
+        weight,
+        bias,
+        scales,
+        zero_points,
+        stride,
+        padding,
+    )
+    out.resize_(result.shape, memory_format=torch.channels_last)
+    out.copy_(result)
+    return out
+
+
+###########################
+### Other Layer Support ###
+###########################
 
 # Keep the scalar qparams in the schema, matching PT2E's boundary operators.
 for _name in ("quantize_per_tensor", "dequantize_per_tensor"):

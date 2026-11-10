@@ -45,6 +45,10 @@ PULP_INT8_WEIGHT_QSPEC = QuantizationSpec(
     qscheme=torch.per_tensor_symmetric,
 )
 
+#################################
+##### PULP-NN Conv2d Config #####
+#################################
+
 
 class PulpConvQuantizationConfig(QuantizationConfig):
     def get_bias_qspec(self, node: Node | None = None) -> QuantizationSpecBase | None:
@@ -114,3 +118,76 @@ PULP_CONV_CONFIG = PulpConvQuantizationConfig(
     bias=None,
     label="PULP-NN u8s8 Conv2d",
 )
+
+# ####################################
+# ##### PULP-NN Depthwise Config #####
+# ####################################
+
+# class PulpDepthwiseQuantizationConfig(QuantizationConfig):
+#     def get_bias_qspec(self, node: Node | None = None) -> QuantizationSpecBase | None:
+#         if node is None:
+#             return None
+
+#         def derive_bias_qparams(obs_or_fqs: list[Any]):
+#             input_scale, _ = obs_or_fqs[0].calculate_qparams()
+#             weight_scale, _ = obs_or_fqs[1].calculate_qparams()
+#             scale = (input_scale * weight_scale).to(torch.float32)
+#             return scale, torch.zeros_like(scale, dtype=torch.int32)
+
+#         return DerivedQuantizationSpec(
+#             derived_from=[(node.args[0], node), (node.args[1], node)],
+#             derive_qparams_fn=derive_bias_qparams,
+#             dtype=torch.int32,
+#             # Float32 Q/DQ cannot represent INT32_MAX; rounding it to 2**31
+#             # before conversion can wrap to INT32_MIN. Use representable limits.
+#             quant_min=-(2**31) + 256,
+#             quant_max=2**31 - 256,
+#             qscheme=torch.per_tensor_symmetric,
+#         )
+
+#     def get_output_act_qspec(
+#         self, node: Node | None = None
+#     ) -> QuantizationSpecBase | None:
+#         if node is None or len(node.args) < 2:
+#             return None
+
+#         weight = node.args[1]
+#         if not isinstance(weight, Node):
+#             return None
+#         weight_value = weight.meta.get("val")
+#         if not isinstance(weight_value, torch.Tensor) or weight_value.dim() != 4:
+#             return None
+#         accumulator_terms = math.prod(weight_value.shape[1:])
+#         if 255 * 127 * accumulator_terms > torch.iinfo(torch.int32).max:
+#             raise ValueError("PULP-NN Depthwise exceeds the int32 accumulator range")
+#         requant_shift = math.ceil(math.log2(127 * accumulator_terms))
+
+#         def derive_output_qparams(obs_or_fqs: list[Any]):
+#             if len(obs_or_fqs) != 2:
+#                 raise ValueError(
+#                     "PULP Depthwise output requires input and weight observers"
+#                 )
+#             input_scale, _ = obs_or_fqs[0].calculate_qparams()
+#             weight_scale, _ = obs_or_fqs[1].calculate_qparams()
+#             output_scale = input_scale * weight_scale * (1 << requant_shift)
+#             return output_scale.to(torch.float32), torch.zeros_like(
+#                 output_scale, dtype=torch.int64
+#             )
+
+#         return DerivedQuantizationSpec(
+#             derived_from=[(node.args[0], node), (node.args[1], node)],
+#             derive_qparams_fn=derive_output_qparams,
+#             dtype=torch.uint8,
+#             quant_min=0,
+#             quant_max=255,
+#             qscheme=torch.per_tensor_affine,
+#         )
+
+
+# PULP_DEPTHWISE_CONFIG = PulpDepthwiseQuantizationConfig(
+#     input_activation=PULP_UINT8_ACTIVATION_QSPEC,
+#     output_activation=PULP_UINT8_ACTIVATION_QSPEC,
+#     weight=PULP_INT8_WEIGHT_QSPEC,
+#     bias=None,
+#     label="PULP-NN u8s8 Depthwise",
+# )

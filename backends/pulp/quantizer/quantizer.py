@@ -31,9 +31,23 @@ class PulpConv2DCheck(PatternCheck):
             memory_format=torch.channels_last
         ):
             return False
+        input_tensor = get_first_fake_tensor(cast(Node, node.args[0]))
+        weight_tensor = get_first_fake_tensor(cast(Node, node.args[1]))
+        if input_tensor.dim() != 4 or weight_tensor.dim() != 4:
+            return False
+        if not input_tensor.is_contiguous(memory_format=torch.channels_last):
+            return False
+        in_channels = input_tensor.shape[1]
+        out_channels = weight_tensor.shape[0]
         dilation = node.args[5] if len(node.args) > 5 else (1, 1)
         groups = node.args[6] if len(node.args) > 6 else 1
-        return tuple(dilation) == (1, 1) and groups == 1
+        is_standard = groups == 1 and weight_tensor.shape[1] == in_channels
+        is_depthwise = (
+            groups == in_channels
+            and out_channels == in_channels
+            and weight_tensor.shape[1] == 1
+        )
+        return tuple(dilation) == (1, 1) and (is_standard or is_depthwise)
 
     @classmethod
     def check_quantization_config(

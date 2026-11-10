@@ -35,15 +35,14 @@ class AtenToPulpPass(AtenToDialectPass):
 def _get_convolution_replacement(
     node: Node, dialect_pass: AtenToDialectPass
 ) -> DialectNodeSpec | None:
-    # Unsupported convolutions (e.g. MobileNet's depthwise layers) remain
-    # floating point and have no folded qparams. Leave them for portable kernels.
+    # Nodes without folded quantization parameters stay on the fallback path.
     if not node.meta.get("input_qparams") or not node.meta.get("output_qparams"):
         return None
+
     input_qparams = get_input_qparams(node)
     output_qparams = get_output_qparams(node)
     if 0 not in input_qparams or 1 not in input_qparams or not output_qparams:
         return None
-
     (
         input_node,
         weight_node,
@@ -55,42 +54,83 @@ def _get_convolution_replacement(
         _,
         groups,
     ) = node.args
-    if transposed or groups != 1 or tuple(dilation) != (1, 1):
-        raise ValueError(
-            "PULP-NN MVP supports only regular Conv2d with groups=1 and dilation=1"
-        )
 
     input_tensor = get_first_fake_tensor(cast(Node, input_node))
+    weight_tensor = get_first_fake_tensor(cast(Node, weight_node))
+
     if input_tensor.dim() != 4 or input_tensor.shape[0] != 1:
-        raise ValueError("PULP-NN MVP requires a static batch size of one")
+        raise ValueError("PULP-NN requires a 4-D input with batch size one")
+    if weight_tensor.dim() != 4:
+        raise ValueError("PULP-NN requires 4-D convolution weights")
+
+    in_channels = input_tensor.shape[1]
+    out_channels = weight_tensor.shape[0]
+
+    is_standard = groups == 1
+    # Use the standard path for the single-channel groups=1 case.
+    is_depthwise = groups != 1 and groups == in_channels and out_channels == in_channels
+
+    if transposed or not (is_standard or is_depthwise) or tuple(dilation) != (1, 1):
+        raise ValueError(
+            "PULP-NN supports only non-transposed standard Conv2d or depthwise Conv2d with multiplier 1 and dilation=1"
+        )
+
+    expected_weight_channels = 1 if is_depthwise else in_channels
+    if weight_tensor.shape[1] != expected_weight_channels:
+        raise ValueError("PULP-NN received incompatible convolution weights")
 
     input_quant = input_qparams[0]
     weight_quant = input_qparams[1]
     output_quant = next(iter(output_qparams.values()))
-    if input_quant.dtype != torch.uint8 or weight_quant.dtype != torch.int8:
-        raise ValueError("PULP-NN MVP requires uint8 activations and int8 weights")
-    if input_quant.zp != 0 or weight_quant.zp != 0 or output_quant.zp != 0:
-        raise ValueError("PULP-NN MVP requires zero-point 0 for all tensors")
 
-    requantize_scale = (
-        float(input_quant.scale) * float(weight_quant.scale) / float(output_quant.scale)
-    )
-    out_shift = round(-math.log2(requantize_scale))
     if (
-        out_shift < 0
-        or out_shift > 31
-        or not math.isclose(requantize_scale, 2.0**-out_shift, rel_tol=1e-5)
+        input_quant.dtype != torch.uint8
+        or weight_quant.dtype != torch.int8
+        or output_quant.dtype != torch.uint8
+    ):
+        raise ValueError("PULP-NN requires uint8 activations/output and int8 weights")
+    if input_quant.zp != 0 or weight_quant.zp != 0 or output_quant.zp != 0:
+        raise ValueError("PULP-NN requires zero-point 0 for all tensors")
+
+    input_scale = float(input_quant.scale)
+    weight_scale = float(weight_quant.scale)
+    output_scale = float(output_quant.scale)
+    if any(
+        not math.isfinite(scale) or scale <= 0
+        for scale in (input_scale, weight_scale, output_scale)
+    ):
+        raise ValueError("PULP-NN requires finite positive quantization scales")
+
+    requantize_scale = input_scale * weight_scale / output_scale
+    if not math.isfinite(requantize_scale) or requantize_scale <= 0:
+        raise ValueError("PULP-NN received an invalid requantization scale")
+
+    out_shift = round(-math.log2(requantize_scale))
+    if not 0 <= out_shift <= 31 or not math.isclose(
+        requantize_scale, 2.0**-out_shift, rel_tol=1e-5
     ):
         raise ValueError(
-            "PULP-NN MVP requantization must be an exact power-of-two right shift; "
-            f"got scale {requantize_scale}"
+            "PULP-NN requantization must be an exact power-of-two "
+            f"right shift; got scale {requantize_scale}"
         )
 
     exported_program = dialect_pass.exported_program
     weight = get_param_tensor(exported_program, cast(Node, weight_node))
     if weight is None:
         raise ValueError("PULP-NN convolution weights must be constant")
-    weight_ohwi = weight.permute(0, 2, 3, 1).contiguous()
+    if weight.dtype != torch.int8 or tuple(weight.shape) != tuple(weight_tensor.shape):
+        raise ValueError("PULP-NN received incompatible constant weights")
+
+    kernel_h, kernel_w = weight.shape[2:]
+
+    if is_depthwise:
+        packed_weight_tensor = weight.contiguous()
+        weight_layout = "oihw"
+        replacement_op = exir_ops.edge.pulp.quantized_depthwise_conv2d.default
+    else:
+        packed_weight_tensor = weight.permute(0, 2, 3, 1).contiguous()
+        weight_layout = "ohwi"
+        replacement_op = exir_ops.edge.pulp.quantized_conv2d.default
 
     bias_tensor = None
     if bias is not None:
@@ -104,7 +144,7 @@ def _get_convolution_replacement(
             or bias_quant.zp != 0
             or not math.isclose(
                 float(bias_quant.scale),
-                float(input_quant.scale) * float(weight_quant.scale),
+                input_scale * weight_scale,
                 rel_tol=1e-5,
             )
         ):
@@ -116,8 +156,8 @@ def _get_convolution_replacement(
                 "PULP-NN bias exceeds the supported int32 quantization range"
             )
 
-    # Every partial dot product must fit the native int32 accumulator, including
-    # its initial bias. Use signed bounds rather than a float approximation.
+    # These bounds apply independently to each output channel,
+    # including depthwise convolution.
     weight_i64 = weight.reshape(weight.shape[0], -1).to(torch.int64)
     initial = bias_tensor.to(torch.int64) if bias_tensor is not None else 0
     lower = initial + 255 * weight_i64.clamp(max=0).sum(1)
@@ -129,23 +169,18 @@ def _get_convolution_replacement(
         packed_weight = create_constant_placeholder(
             exported_program,
             node.graph,
-            node.name + "_weight_ohwi",
+            node.name + f"_weight_{weight_layout}",
             InputKind.BUFFER,
-            weight_ohwi,
+            packed_weight_tensor,
             persistent_buffer=True,
         )
-        # These are live operator inputs, so their values survive serialization.
         scales = create_constant_placeholder(
             exported_program,
             node.graph,
             node.name + "_scales",
             InputKind.BUFFER,
             torch.tensor(
-                [
-                    float(input_quant.scale),
-                    float(weight_quant.scale),
-                    float(output_quant.scale),
-                ],
+                [input_scale, weight_scale, output_scale],
                 dtype=torch.float32,
             ),
             persistent_buffer=True,
@@ -159,21 +194,21 @@ def _get_convolution_replacement(
             persistent_buffer=True,
         )
 
-    _, kernel_h, kernel_w, input_channels = weight_ohwi.shape
-    scratch_bytes = 2 * PULP_NUM_CORES * input_channels * kernel_h * kernel_w
-    return DialectNodeSpec(
-        exir_ops.edge.pulp.quantized_conv2d.default,
-        (
-            input_node,
-            packed_weight,
-            bias,
-            scales,
-            zero_points,
-            list(stride),
-            list(padding),
-            scratch_bytes,
-        ),
+    replacement_args = (
+        input_node,
+        packed_weight,
+        bias,
+        scales,
+        zero_points,
+        list(stride),
+        list(padding),
     )
+
+    if not is_depthwise:
+        scratch_bytes = 2 * PULP_NUM_CORES * in_channels * kernel_h * kernel_w
+        replacement_args += (scratch_bytes,)
+
+    return DialectNodeSpec(replacement_op, replacement_args)
 
 
 @AtenToPulpPass.register_dialect_substitution(
