@@ -25,6 +25,14 @@ set(PULP_NUM_CORES
     CACHE STRING "PULP cluster core count"
 )
 
+set(PULP_QUANTIZATION_L1_BYTES
+    32768
+    CACHE STRING "Maximum L1 arena bytes for DMA-tiled quantization"
+)
+if(PULP_QUANTIZATION_L1_BYTES LESS 256)
+  message(FATAL_ERROR "PULP_QUANTIZATION_L1_BYTES must be at least 256")
+endif()
+
 if(EXECUTORCH_BUILD_PULP)
   if(NOT EXISTS "${PULP_NN_ROOT}/32bit/include/pulp_nn_kernels.h")
     message(FATAL_ERROR "Set PULP_NN_ROOT to the checked-in PULP-NN tree")
@@ -58,15 +66,28 @@ if(EXECUTORCH_BUILD_PULP)
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_conv2d.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_depthwise_conv2d.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor_cluster.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_quantization_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
   )
-  # Boundary conversions run on the FC, which has no floating-point unit.
+  # Legacy conversions and cluster-op wrappers run on the FC without an FPU.
+  # Only pulp_quantization_cluster.c executes FP32 arithmetic on the cluster.
   set_source_files_properties(
-    ops/op_quantize_per_tensor.cpp PROPERTIES COMPILE_OPTIONS
-                                              "-march=rv32imc_xpulpv3"
+    ops/op_quantize_per_tensor.cpp ops/op_quantize_per_tensor_cluster.cpp
+    PROPERTIES COMPILE_OPTIONS "-march=rv32imc_xpulpv3"
   )
   add_library(pulp_kernels ${_pulp_kernel_sources})
-  target_compile_definitions(pulp_kernels PRIVATE NUM_CORES=${PULP_NUM_CORES})
+  target_compile_definitions(
+    pulp_kernels
+    PRIVATE NUM_CORES=${PULP_NUM_CORES}
+            PULP_QUANTIZATION_L1_BYTES=${PULP_QUANTIZATION_L1_BYTES}
+  )
+  # Arithmetic workers require the cluster FP32 ISA; do not compile with
+  # fast-math.
+  set_source_files_properties(
+    ops/pulp_quantization_cluster.c
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math"
+  )
   target_compile_options(pulp_kernels PRIVATE -O3)
   target_include_directories(
     pulp_kernels

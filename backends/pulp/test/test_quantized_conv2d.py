@@ -215,9 +215,9 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
         self.assertEqual(
             [op.name for op in program.executorch_program.execution_plan[0].operators],
             [
-                "pulp::quantize_per_tensor",
+                "pulp::quantize_per_tensor_cluster",
                 "pulp::quantized_conv2d",
-                "pulp::dequantize_per_tensor",
+                "pulp::dequantize_per_tensor_cluster",
             ],
         )
 

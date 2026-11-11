@@ -2,9 +2,10 @@
 
 This backend adds PULP-NN operators directly to the ExecuTorch operator
 registry. It is an optimized-kernel integration, not an ExecuTorch delegate.
-The ExecuTorch method runs on the fabric controller (FC). Boundary conversions
-run on the FC using software floating point; the runtime opens the cluster once
-and sends supported convolutions to it synchronously.
+The ExecuTorch method runs on the fabric controller (FC). The runtime opens the
+cluster once and sends supported convolutions and DMA-tiled quantization /
+dequantization to it synchronously. Conversion arithmetic runs on the cluster
+FP32 units, partitioned over the configured cores.
 
 ## Conv2d MVP
 
@@ -23,8 +24,8 @@ bias (when present), and two three-element tensors: `scales` (float32) and
 `zero_points` (int32), ordered `[input, weight, output]`. They are actual
 operator inputs and survive PTE serialization. Buffer names need not match
 CMSIS-NN's generated names. Public model I/O is FP32. Lowering preserves boundary
-conversions and emits `pulp::quantize_per_tensor` and
-`pulp::dequantize_per_tensor`, surrounding the UINT8 convolution. Folded Q/DQ
+conversions and emits `pulp::quantize_per_tensor_cluster` and
+`pulp::dequantize_per_tensor_cluster`, surrounding the UINT8 convolution. Folded Q/DQ
 pairs between supported quantized operators remain folded; weights and bias
 are still quantized ahead of time.
 
@@ -86,6 +87,67 @@ quantization, real zero is encoded as the tensor zero point. Requiring zero
 point 0 therefore makes PULP-NN's padding numerically correct. This MVP cannot
 represent negative input activations; a later fused batch-normalization/ReLU
 path can naturally preserve this unsigned activation contract.
+
+## DMA-tiled cluster quantization
+
+New exports lower activation conversions to distinct operators:
+
+- `pulp::quantize_per_tensor_cluster`: FP32 to UINT8;
+- `pulp::dequantize_per_tensor_cluster`: UINT8 to FP32.
+
+Both have functional and `.out` schemas with the existing scalar arguments
+`(input, scale, zero_point, quant_min, quant_max, dtype)`. The original
+`pulp::quantize_per_tensor` / `pulp::dequantize_per_tensor` FC implementations
+remain registered for older PTEs. Regenerate models to select the new kernels;
+the deployment scripts already do this before building and running.
+
+The numerical contract remains per-tensor affine UINT8, FP32 input/output,
+finite positive FP32-representable scales, and
+`0 <= quant_min <= zero_point <= quant_max <= 255`. Quantization computes
+`clamp(round_to_nearest_even(input * float(1.0 / scale)) + zero_point)`.
+Dequantization computes `(int(input) - zero_point) * float(scale)` without
+clamping the byte input. Infinity saturates on quantization; a NaN scaled value
+fails with `InvalidArgument`, as in the existing native FC kernel. Weight
+quantization is still performed ahead of time; runtime INT8 activation
+quantization is not added by this change. Dense tensor shape and physical
+storage order are preserved, including channels-last activations.
+
+Each operator sends one task to the cluster. The cluster controller allocates
+one bounded L1 arena, then processes L2 data in sequential tiles:
+
+1. DMA input from L2 to L1 and wait for completion.
+2. Fork the conversion worker across `NUM_CORES`, with disjoint element ranges.
+3. DMA the output back to L2 and wait before reusing the buffers.
+
+There is no per-tile FC dispatch. Each tile uses one FP32 buffer and one byte
+buffer (five bytes per element), plus the job descriptor and per-core error
+flags. `PULP_QUANTIZATION_L1_BYTES` is a CMake cache setting, default 16384 bytes,
+which bounds the complete arena. If allocation fails, the controller halves
+the tile capacity and retries down to four elements. If that also fails, the
+operator reports an execution error. DMA commands are capped below 64 KiB,
+and partial byte tails transfer exactly their valid length. Empty tensors need
+no DMA or worker launch. This implementation uses sequential tiles, with no
+double buffering or overlap between DMA and computation.
+
+Only `ops/pulp_quantization_cluster.c` performs hardware FP32 arithmetic;
+wrappers retain the FC software-float ISA. The cluster source disables
+fast-math and FP contraction to retain the existing rounding behavior. The
+cluster must have FP32 support and use the supplied Zfinx-capable toolchain.
+A double-precision reciprocal is computed once in the FC wrapper, then passed
+as FP32 to the quantization workers, matching the legacy kernel.
+
+Run the reference, lowering and host DMA-worker regressions with:
+
+```bash
+python -m unittest executorch.backends.pulp.test.test_quantization_cluster \
+  executorch.backends.pulp.test.test_quantized_conv2d \
+  executorch.backends.pulp.test.test_quantized_depthwise
+```
+
+The host worker tests force a 256-byte arena to exercise many tiles, odd tails,
+nonzero zero points, halfway rounding, infinities, NaN rejection, allocation
+failure and retries with smaller tiles. The deployment tests exercise the real
+SDK DMA and cluster cores; timing results remain in each `logs/performance.md`.
 
 ## Depthwise Conv2d
 

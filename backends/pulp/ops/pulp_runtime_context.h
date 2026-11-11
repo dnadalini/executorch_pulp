@@ -36,6 +36,29 @@ typedef struct {
   int status;
 } PulpConv2dArgs;
 
+enum {
+  PULP_QUANTIZATION_RUNTIME_ERROR = -1,
+  PULP_QUANTIZATION_INVALID_INPUT = -2,
+};
+
+typedef struct {
+  const void* input;
+  void* output;
+  size_t count;
+  float scale;
+  float inverse_scale;
+  int32_t zero_point;
+  int32_t quant_min;
+  int32_t quant_max;
+  int quantize;
+  int status;
+} PulpQuantizationArgs;
+
+// DMA-tiled conversion: flat physical storage order is preserved.
+int pulp_runtime_run_quantization(PulpQuantizationArgs* args);
+// Cluster entry, used only by the platform dispatcher.
+void pulp_cluster_quantization_entry(void* context);
+
 // Platform initialization
 int pulp_runtime_initialize(void);
 void pulp_runtime_shutdown(void);

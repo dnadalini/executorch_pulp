@@ -220,7 +220,9 @@ def _get_quantize_replacement(
     del dialect_pass
     if node.args[5] != torch.uint8:
         raise ValueError("PULP boundary quantization requires uint8 activations")
-    return DialectNodeSpec(exir_ops.edge.pulp.quantize_per_tensor.default, node.args)
+    return DialectNodeSpec(
+        exir_ops.edge.pulp.quantize_per_tensor_cluster.default, node.args
+    )
 
 
 @AtenToPulpPass.register_dialect_substitution(
@@ -232,4 +234,6 @@ def _get_dequantize_replacement(
     del dialect_pass
     if node.args[5] != torch.uint8:
         raise ValueError("PULP boundary dequantization requires uint8 activations")
-    return DialectNodeSpec(exir_ops.edge.pulp.dequantize_per_tensor.default, node.args)
+    return DialectNodeSpec(
+        exir_ops.edge.pulp.dequantize_per_tensor_cluster.default, node.args
+    )

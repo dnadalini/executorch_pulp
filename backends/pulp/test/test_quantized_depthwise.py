@@ -173,7 +173,7 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s, int k, int l, int shift) { retu
 """
             )
             (tmp / "host.c").write_text(
-                "int host_core; int host_fail_alloc; void pulp_nn_conv_Ho_parallel_i32_bias(void) {}\n"
+                "int host_core; int host_fail_alloc; void pulp_nn_conv_Ho_parallel_i32_bias(void) {} void pulp_cluster_quantization_entry(void *p) { (void)p; }\n"
             )
             library_path = tmp / "depthwise.so"
             subprocess.run(

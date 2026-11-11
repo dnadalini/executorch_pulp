@@ -299,6 +299,11 @@ def _check_qparams(scale, zero_point, quant_min, quant_max, dtype):
         or not 0 <= quant_min <= zero_point <= quant_max <= 255
     ):
         raise ValueError("Invalid PULP uint8 quantization parameters")
+    # The native kernels consume FP32 scale parameters. Reject values that
+    # underflow to zero or overflow on that conversion, as the FC kernel does.
+    scale32 = torch.tensor(scale, dtype=torch.float32)
+    if not torch.isfinite(scale32) or scale32 <= 0:
+        raise ValueError("PULP quantization scale must be finite positive FP32")
 
 
 @register_fake("pulp::quantize_per_tensor")
@@ -316,11 +321,10 @@ def quantize_impl(input, scale, zero_point, quant_min, quant_max, dtype):
     _check_qparams(scale, zero_point, quant_min, quant_max, dtype)
     if input.dtype != torch.float32:
         raise ValueError("PULP quantization expects float32 input")
-    return (
-        (torch.round(input * (1.0 / scale)) + zero_point)
-        .clamp(quant_min, quant_max)
-        .to(dtype)
-    )
+    scaled = input * (1.0 / scale)
+    if torch.isnan(scaled).any():
+        raise ValueError("PULP quantization does not accept NaN scaled values")
+    return (torch.round(scaled) + zero_point).clamp(quant_min, quant_max).to(dtype)
 
 
 @impl(lib, "dequantize_per_tensor", "CompositeExplicitAutograd")
@@ -355,3 +359,17 @@ def dequantize_out(input, scale, zero_point, quant_min, quant_max, dtype, *, out
     )
     out.copy_(result)
     return out
+
+
+# Distinct cluster instruction names share the existing Python numerical
+# reference. Device implementations use DMA tiles and cluster FP32 workers.
+for _base, _meta, _functional, _out in (
+    ("quantize_per_tensor", quantize_meta, quantize_impl, quantize_out),
+    ("dequantize_per_tensor", dequantize_meta, dequantize_impl, dequantize_out),
+):
+    _cluster_name = _base + "_cluster"
+    lib.define(f"{_cluster_name}({_args}) -> Tensor")
+    lib.define(f"{_cluster_name}.out({_args}, *, Tensor(a!) out) -> Tensor(a!)")
+    register_fake(f"pulp::{_cluster_name}")(_meta)
+    impl(lib, _cluster_name, "CompositeExplicitAutograd")(_functional)
+    impl(lib, _cluster_name + ".out", "CompositeExplicitAutograd")(_out)

@@ -252,3 +252,18 @@ int pulp_runtime_run_depthwise_conv2d(PulpConv2dArgs* args) {
       &cluster_device, pi_cluster_task(&task, cluster_depthwise_conv_entry, args));
   return args->status == 0;
 }
+
+
+int pulp_runtime_run_quantization(PulpQuantizationArgs* args) {
+  struct pi_cluster_task task;
+  if (args == NULL) return 0;
+  args->status = PULP_QUANTIZATION_RUNTIME_ERROR;
+  if (args->count == 0) {
+    args->status = 0;
+    return 1;
+  }
+  if (!cluster_initialized) return 0;
+  pi_cluster_send_task_to_cl(
+      &cluster_device, pi_cluster_task(&task, pulp_cluster_quantization_entry, args));
+  return args->status == 0;
+}
