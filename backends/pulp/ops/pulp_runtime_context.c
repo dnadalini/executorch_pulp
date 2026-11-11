@@ -267,3 +267,68 @@ int pulp_runtime_run_quantization(PulpQuantizationArgs* args) {
       &cluster_device, pi_cluster_task(&task, pulp_cluster_quantization_entry, args));
   return args->status == 0;
 }
+
+
+static void pointwise_worker(void* context) {
+  PulpConv2dArgs* args = (PulpConv2dArgs*)context;
+  pulp_nn_pointwise_Co_parallel(
+      args->input, (uint8_t*)(args + 1), args->bias, args->output, args->weight,
+      NULL, NULL, 1, args->out_shift, args->input_w, args->input_h,
+      args->input_channels, args->output_w, args->output_h, args->output_channels,
+      1, 1, args->padding_top, args->padding_bottom, args->padding_left,
+      args->padding_right, args->stride_w, args->stride_h, 0, 0);
+}
+
+static void cluster_pointwise_entry(void* context) {
+  PulpPointwiseArgs* job = (PulpPointwiseArgs*)context;
+  PulpConv2dArgs* args = &job->kernel;
+  const uint64_t input_one = (uint64_t)args->input_w * args->input_h * args->input_channels;
+  const uint64_t output_one = (uint64_t)args->output_w * args->output_h * args->output_channels;
+  const uint64_t input_bytes = input_one * job->batches;
+  const uint64_t output_bytes = output_one * job->batches;
+  const uint64_t weight_bytes = (uint64_t)args->input_channels * args->output_channels;
+  const uint64_t bias_bytes = args->bias == NULL ? 0 : sizeof(int32_t) * args->output_channels;
+  const size_t scratch = 2 * NUM_CORES * (((size_t)args->input_channels + 3) & ~(size_t)3);
+  const uint64_t input_padded = (input_bytes + 3) & ~UINT64_C(3);
+  const uint64_t weight_padded = (weight_bytes + 3) & ~UINT64_C(3);
+  const uint64_t total = sizeof(PulpConv2dArgs) + scratch + bias_bytes + input_padded + weight_padded + output_bytes;
+  if (total > UINT32_MAX) { args->status = -1; return; }
+  uint8_t* arena = (uint8_t*)pi_cl_l1_malloc(0, (size_t)total);
+  if (arena == NULL) { args->status = -1; return; }
+  PulpConv2dArgs* local = (PulpConv2dArgs*)arena;
+  *local = *args;
+  local->scratch_bytes = scratch;
+  uint8_t* cursor = arena + sizeof(PulpConv2dArgs) + scratch;
+  local->bias = NULL;
+  if (bias_bytes) {
+    local->bias = (const int32_t*)cursor;
+    memcpy(cursor, args->bias, (size_t)bias_bytes);
+    cursor += (size_t)bias_bytes;
+  }
+  uint8_t* input = cursor;
+  memcpy(input, args->input, (size_t)input_bytes);
+  cursor += (size_t)input_padded;
+  local->weight = (const int8_t*)cursor;
+  memcpy(cursor, args->weight, (size_t)weight_bytes);
+  cursor += (size_t)weight_padded;
+  uint8_t* output = cursor;
+  // Linear vectors use exactly H=W=1, sharing weights and bias across rows.
+  for (size_t batch = 0; batch < job->batches; ++batch) {
+    local->input = input + batch * (size_t)input_one;
+    local->output = output + batch * (size_t)output_one;
+    pi_cl_team_fork(NUM_CORES, pointwise_worker, local);
+  }
+  memcpy(args->output, output, (size_t)output_bytes);
+  pi_cl_l1_free(0, arena, (size_t)total);
+  args->status = 0;
+}
+
+int pulp_runtime_run_pointwise(PulpPointwiseArgs* args) {
+  struct pi_cluster_task task;
+  if (args == NULL) return 0;
+  args->kernel.status = -1;
+  if (args->batches == 0) { args->kernel.status = 0; return 1; }
+  if (!cluster_initialized) return 0;
+  pi_cluster_send_task_to_cl(&cluster_device, pi_cluster_task(&task, cluster_pointwise_entry, args));
+  return args->kernel.status == 0;
+}

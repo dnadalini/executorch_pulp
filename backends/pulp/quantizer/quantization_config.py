@@ -51,6 +51,8 @@ PULP_INT8_WEIGHT_QSPEC = QuantizationSpec(
 
 
 class PulpConvQuantizationConfig(QuantizationConfig):
+    """Shared per-tensor recipe for convolution and linear dot products."""
+
     def get_bias_qspec(self, node: Node | None = None) -> QuantizationSpecBase | None:
         if node is None:
             return None
@@ -82,11 +84,14 @@ class PulpConvQuantizationConfig(QuantizationConfig):
         if not isinstance(weight, Node):
             return None
         weight_value = weight.meta.get("val")
-        if not isinstance(weight_value, torch.Tensor) or weight_value.dim() != 4:
+        if not isinstance(weight_value, torch.Tensor) or weight_value.dim() not in (
+            2,
+            4,
+        ):
             return None
         accumulator_terms = math.prod(weight_value.shape[1:])
         if 255 * 127 * accumulator_terms > torch.iinfo(torch.int32).max:
-            raise ValueError("PULP-NN Conv2d exceeds the int32 accumulator range")
+            raise ValueError("PULP-NN dot product exceeds the int32 accumulator range")
         requant_shift = math.ceil(math.log2(127 * accumulator_terms))
 
         def derive_output_qparams(obs_or_fqs: list[Any]):
@@ -116,7 +121,7 @@ PULP_CONV_CONFIG = PulpConvQuantizationConfig(
     output_activation=PULP_UINT8_ACTIVATION_QSPEC,
     weight=PULP_INT8_WEIGHT_QSPEC,
     bias=None,
-    label="PULP-NN u8s8 Conv2d",
+    label="PULP-NN u8s8 convolution/linear",
 )
 
 # ####################################

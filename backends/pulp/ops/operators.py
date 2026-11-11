@@ -373,3 +373,124 @@ for _base, _meta, _functional, _out in (
     register_fake(f"pulp::{_cluster_name}")(_meta)
     impl(lib, _cluster_name, "CompositeExplicitAutograd")(_functional)
     impl(lib, _cluster_name + ".out", "CompositeExplicitAutograd")(_out)
+
+
+# The same OI-matrix operator handles spatial 1x1 convolutions and linear
+# vectors. The linear flag preserves the original public rank/shape; each
+# vector is presented to the native pointwise kernel as H=W=1.
+_pointwise_args = "Tensor input, Tensor weight, Tensor? bias, Tensor scales, Tensor zero_points, int[] stride, int[] padding, bool linear=False"
+lib.define(f"quantized_pointwise({_pointwise_args}) -> Tensor")
+lib.define(
+    f"quantized_pointwise.out({_pointwise_args}, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+def _pointwise_shape(input, weight, stride, padding, linear):
+    if weight.dim() != 2 or input.dim() < 1:
+        raise ValueError("PULP pointwise expects an OI weight matrix")
+    if (
+        len(stride) != 2
+        or len(padding) != 2
+        or any(s <= 0 for s in stride)
+        or any(p < 0 for p in padding)
+    ):
+        raise ValueError("Invalid PULP pointwise stride/padding")
+    if linear:
+        if (
+            tuple(stride) != (1, 1)
+            or tuple(padding) != (0, 0)
+            or input.shape[-1] != weight.shape[1]
+        ):
+            raise ValueError("Invalid PULP pointwise linear shape or parameters")
+        return (*input.shape[:-1], weight.shape[0])
+    if input.dim() != 4 or input.shape[0] != 1 or input.shape[1] != weight.shape[1]:
+        raise ValueError(
+            "PULP pointwise Conv2d requires batch one and matching channels"
+        )
+    n, _, h, w = input.shape
+    return (
+        n,
+        weight.shape[0],
+        (h + 2 * padding[0] - 1) // stride[0] + 1,
+        (w + 2 * padding[1] - 1) // stride[1] + 1,
+    )
+
+
+@register_fake("pulp::quantized_pointwise")
+def quantized_pointwise_meta(
+    input, weight, bias, scales, zero_points, stride, padding, linear=False
+):
+    return torch.empty(
+        _pointwise_shape(input, weight, stride, padding, linear),
+        dtype=torch.uint8,
+        device=input.device,
+        memory_format=torch.contiguous_format if linear else torch.channels_last,
+    )
+
+
+@impl(lib, "quantized_pointwise", "CompositeExplicitAutograd")
+def quantized_pointwise_impl(
+    input, weight, bias, scales, zero_points, stride, padding, linear=False
+):
+    _pointwise_shape(input, weight, stride, padding, linear)
+    if input.dtype != torch.uint8 or weight.dtype != torch.int8:
+        raise ValueError("PULP pointwise requires uint8 input and int8 OI weights")
+    if (
+        scales.dtype != torch.float32
+        or scales.shape != (3,)
+        or not torch.isfinite(scales).all()
+        or (scales <= 0).any()
+    ):
+        raise ValueError("PULP pointwise requires three positive FP32 scales")
+    if (
+        zero_points.dtype != torch.int32
+        or zero_points.shape != (3,)
+        or zero_points.any()
+    ):
+        raise ValueError("PULP pointwise requires three zero int32 zero points")
+    if bias is not None and (
+        bias.dtype != torch.int32 or bias.shape != (weight.shape[0],)
+    ):
+        raise ValueError("PULP pointwise bias must be int32, one per output channel")
+    ratio = float(scales[0]) * float(scales[1]) / float(scales[2])
+    shift = round(-math.log2(ratio))
+    if not 0 <= shift <= 31 or not math.isclose(ratio, 2.0**-shift, rel_tol=1e-5):
+        raise ValueError(
+            "PULP pointwise requires power-of-two right-shift requantization"
+        )
+    if linear:
+        accumulator = F.linear(input.double(), weight.double()).to(torch.int64)
+        if bias is not None:
+            accumulator += bias.to(torch.int64)
+    else:
+        accumulator = F.conv2d(
+            input.double(),
+            weight.double().reshape(weight.shape[0], weight.shape[1], 1, 1),
+            stride=tuple(stride),
+            padding=tuple(padding),
+        ).to(torch.int64)
+        if bias is not None:
+            accumulator += bias.to(torch.int64).reshape(1, -1, 1, 1)
+    return (
+        (accumulator >> shift)
+        .clamp(0, 255)
+        .to(
+            torch.uint8,
+            memory_format=torch.contiguous_format if linear else torch.channels_last,
+        )
+    )
+
+
+@impl(lib, "quantized_pointwise.out", "CompositeExplicitAutograd")
+def quantized_pointwise_out(
+    input, weight, bias, scales, zero_points, stride, padding, linear=False, *, out
+):
+    result = quantized_pointwise_impl(
+        input, weight, bias, scales, zero_points, stride, padding, linear
+    )
+    out.resize_(
+        result.shape,
+        memory_format=torch.contiguous_format if linear else torch.channels_last,
+    )
+    out.copy_(result)
+    return out

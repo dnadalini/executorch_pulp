@@ -44,7 +44,7 @@ class TestPulpQuantizedConv2d(unittest.TestCase):
         expected = edge.exported_program().module()(example)
         edge = edge.transform(PulpPassManager())
         targets = [str(node.target) for node in edge.exported_program().graph.nodes]
-        self.assertEqual(sum("pulp.quantized_conv2d" in name for name in targets), 1)
+        self.assertEqual(sum("pulp.quantized_pointwise" in name for name in targets), 1)
         self.assertEqual(
             sum("pulp.quantized_depthwise_conv2d" in name for name in targets), 1
         )

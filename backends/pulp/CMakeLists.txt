@@ -46,6 +46,7 @@ if(EXECUTORCH_BUILD_PULP)
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_conv_Ho_parallel.c
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_depthwise_generic.c
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_matmul.c
+    ${PULP_NN_ROOT}/32bit/src/pulp_nn_pointwise_Co_parallel.c
     ${PULP_NN_ROOT}/32bit/src/pulp_nn_utils.c
   )
   if(NOT EXISTS "${PULP_NN_ROOT}/32bit/include/pulp_nn_bias.h")
@@ -64,6 +65,7 @@ if(EXECUTORCH_BUILD_PULP)
 
   set(_pulp_kernel_sources
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_conv2d.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_pointwise.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_depthwise_conv2d.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor_cluster.cpp

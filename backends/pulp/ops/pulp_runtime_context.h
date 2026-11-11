@@ -36,6 +36,13 @@ typedef struct {
   int status;
 } PulpConv2dArgs;
 
+typedef struct {
+  PulpConv2dArgs kernel;
+  size_t batches;
+} PulpPointwiseArgs;
+
+int pulp_runtime_run_pointwise(PulpPointwiseArgs* args);
+
 enum {
   PULP_QUANTIZATION_RUNTIME_ERROR = -1,
   PULP_QUANTIZATION_INVALID_INPUT = -2,

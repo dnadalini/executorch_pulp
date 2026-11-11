@@ -187,6 +187,67 @@ python -m unittest executorch.backends.pulp.test.test_quantized_depthwise \
 The host tests substitute SDK scheduling and PULP intrinsics; they do not
 replace device or GVSoC validation.
 
+## Pointwise convolution and linear
+
+`pulp::quantized_pointwise` is the common UINT8/INT8 operator for dense 1x1
+convolutions and quantized linear layers. It calls the checked-in
+`pulp_nn_pointwise_Co_parallel_i32_bias` kernel, partitioning output channels
+across the cluster cores. Larger convolution kernels retain the existing
+spatial-parallel convolution operator; grouped depthwise layers retain the
+depthwise operator, including depthwise 1x1 filters.
+
+The operator takes `(input, weight, bias, scales, zero_points, stride, padding,
+linear=False)`. Weights are a contiguous OI matrix in both modes. Input/output
+are channels-last NCHW tensors in convolution mode. In linear mode, contiguous
+inputs of any supported positive rank retain their leading dimensions and
+replace the final feature dimension with the output features. The runtime
+flattens those leading dimensions into a row count and executes each vector
+with **input/output H=W=1**, sharing weights and bias across rows. No graph
+reshape/copy operators are required for eligible linear inputs.
+
+The PULP quantizer now annotates `aten.linear` with the same per-tensor UINT8
+activation, symmetric INT8 weight, INT32 bias, zero-point-zero and power-of-two
+right-shift contract as convolution. `pulp_edge_compile_config()` preserves
+linear until PULP lowering consumes it. Unquantized/ineligible linear nodes are
+decomposed back to float matmul/addmm and shape/layout copies for portable
+fallback. Public model I/O remains FP32; quantized linear outputs have the
+same nonnegative/clipping behavior as the existing PULP convolutions. This
+changes the quantized classifier compared with the previous FP32 fallback;
+classification accuracy needs evaluation with representative calibration.
+
+The Co-parallel kernel retains the optimized two-pixel/four-output-channel
+matmul path for aligned channel counts. Its int32-bias opt-in ABI, per-core
+weight and bias offsets, odd-width handling and null BN pointers are corrected.
+Odd input-channel counts use bounded vector/scalar loads. Non-unit strides and
+padding gather one or two input vectors per core before dot products. The
+kernel's activation/BN flags stay disabled; fusion is separate work.
+
+Pointwise scratch is derived at runtime:
+
+```text
+2 * NUM_CORES * round_up(INPUT_CHANNELS, 4) bytes
+```
+
+One L1 arena holds the arguments, scratch, aligned bias, input, OI weights and
+output. Linear rows reuse the staged weights and bias. The complete operation
+must fit L1; pointwise/linear EDMA tiling is not implemented in this change.
+A Co-parallel mapping is particularly useful for small spatial maps and linear
+vectors. It can be slower than spatial parallelism on larger feature maps;
+check the actual per-instruction timings for the selected shapes.
+
+Regenerate PTEs and golden vectors using the existing deployment scripts to
+select the new operator. Existing PTEs using `pulp::quantized_conv2d` remain
+valid. The standalone pointwise, three-layer and MobileNet reports now count
+and display the dedicated operator, including linear MACs. Tests include
+odd/even channels and widths, stride/padding, nontrivial int32 bias, dynamic
+linear row counts, multi-dimensional linear inputs, float fallback and PTE
+serialization. Host-native tests exercise the actual Co kernel and matmul
+under undefined-behavior sanitization.
+
+```bash
+python -m unittest executorch.backends.pulp.test.test_quantized_pointwise
+```
+
 ## Export
 
 From the parent repository, use the Python environment containing this fork's

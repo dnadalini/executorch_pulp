@@ -35,6 +35,65 @@ class AtenToPulpPass(AtenToDialectPass):
 def _get_convolution_replacement(
     node: Node, dialect_pass: AtenToDialectPass
 ) -> DialectNodeSpec | None:
+    return _get_affine_replacement(node, dialect_pass)
+
+
+@AtenToPulpPass.register_dialect_substitution(exir_ops.edge.aten.linear.default)
+def _get_linear_replacement(
+    node: Node, dialect_pass: AtenToDialectPass
+) -> DialectNodeSpec | None:
+    replacement = _get_affine_replacement(node, dialect_pass, linear=True)
+    if replacement is not None:
+        return replacement
+    # Preserve float fallback when a linear was deliberately left unquantized.
+    # Edge preserves linear for PULP lowering, so decompose only this remainder.
+    inputs, weights = node.args[:2]
+    bias = node.args[2] if len(node.args) > 2 else None
+    input_tensor = get_first_fake_tensor(cast(Node, inputs))
+    weight_tensor = get_first_fake_tensor(cast(Node, weights))
+    with node.graph.inserting_before(node):
+
+        def size_value(value, tensor, dim):
+            size = tensor.shape[dim]
+            return (
+                size
+                if isinstance(size, int)
+                else node.graph.call_function(
+                    exir_ops.edge.aten.sym_size.int, (value, dim)
+                )
+            )
+
+        contiguous = node.graph.call_function(
+            exir_ops.edge.dim_order_ops._to_dim_order_copy.default,
+            (inputs,),
+            {"dim_order": list(range(input_tensor.dim()))},
+        )
+        flat = node.graph.call_function(
+            exir_ops.edge.aten.view_copy.default,
+            (contiguous, [-1, size_value(weights, weight_tensor, 1)]),
+        )
+        transposed = node.graph.call_function(
+            exir_ops.edge.aten.permute_copy.default, (weights, [1, 0])
+        )
+        if bias is None:
+            result = node.graph.call_function(
+                exir_ops.edge.aten.mm.default, (flat, transposed)
+            )
+        else:
+            result = node.graph.call_function(
+                exir_ops.edge.aten.addmm.default, (bias, flat, transposed)
+            )
+        shape = [
+            size_value(inputs, input_tensor, dim)
+            for dim in range(input_tensor.dim() - 1)
+        ]
+        shape.append(size_value(weights, weight_tensor, 0))
+    return DialectNodeSpec(exir_ops.edge.aten.view_copy.default, (result, shape))
+
+
+def _get_affine_replacement(
+    node: Node, dialect_pass: AtenToDialectPass, linear: bool = False
+) -> DialectNodeSpec | None:
     # Nodes without folded quantization parameters stay on the fallback path.
     if not node.meta.get("input_qparams") or not node.meta.get("output_qparams"):
         return None
@@ -43,41 +102,51 @@ def _get_convolution_replacement(
     output_qparams = get_output_qparams(node)
     if 0 not in input_qparams or 1 not in input_qparams or not output_qparams:
         return None
-    (
-        input_node,
-        weight_node,
-        bias,
-        stride,
-        padding,
-        dilation,
-        transposed,
-        _,
-        groups,
-    ) = node.args
-
+    if linear:
+        input_node, weight_node = node.args[:2]
+        bias = node.args[2] if len(node.args) > 2 else None
+        stride, padding, dilation, transposed, groups = (1, 1), (0, 0), (1, 1), False, 1
+    else:
+        (
+            input_node,
+            weight_node,
+            bias,
+            stride,
+            padding,
+            dilation,
+            transposed,
+            _,
+            groups,
+        ) = node.args
     input_tensor = get_first_fake_tensor(cast(Node, input_node))
     weight_tensor = get_first_fake_tensor(cast(Node, weight_node))
-
-    if input_tensor.dim() != 4 or input_tensor.shape[0] != 1:
-        raise ValueError("PULP-NN requires a 4-D input with batch size one")
-    if weight_tensor.dim() != 4:
-        raise ValueError("PULP-NN requires 4-D convolution weights")
-
-    in_channels = input_tensor.shape[1]
+    if linear:
+        if (
+            input_tensor.dim() < 1
+            or not input_tensor.is_contiguous()
+            or weight_tensor.dim() != 2
+        ):
+            raise ValueError("PULP-NN linear requires contiguous input and 2-D weights")
+        in_channels = input_tensor.shape[-1]
+    else:
+        if (
+            input_tensor.dim() != 4
+            or input_tensor.shape[0] != 1
+            or weight_tensor.dim() != 4
+        ):
+            raise ValueError(
+                "PULP-NN convolution requires a 4-D input with batch size one and 4-D weights"
+            )
+        in_channels = input_tensor.shape[1]
     out_channels = weight_tensor.shape[0]
-
     is_standard = groups == 1
-    # Use the standard path for the single-channel groups=1 case.
-    is_depthwise = groups != 1 and groups == in_channels and out_channels == in_channels
-
+    is_depthwise = not linear and groups != 1 and groups == in_channels == out_channels
     if transposed or not (is_standard or is_depthwise) or tuple(dilation) != (1, 1):
         raise ValueError(
-            "PULP-NN supports only non-transposed standard Conv2d or depthwise Conv2d with multiplier 1 and dilation=1"
+            "PULP-NN supports standard/depthwise convolution with dilation=1"
         )
-
-    expected_weight_channels = 1 if is_depthwise else in_channels
-    if weight_tensor.shape[1] != expected_weight_channels:
-        raise ValueError("PULP-NN received incompatible convolution weights")
+    if weight_tensor.shape[1] != (1 if is_depthwise else in_channels):
+        raise ValueError("PULP-NN received incompatible weights")
 
     input_quant = input_qparams[0]
     weight_quant = input_qparams[1]
@@ -121,9 +190,14 @@ def _get_convolution_replacement(
     if weight.dtype != torch.int8 or tuple(weight.shape) != tuple(weight_tensor.shape):
         raise ValueError("PULP-NN received incompatible constant weights")
 
-    kernel_h, kernel_w = weight.shape[2:]
+    kernel_h, kernel_w = (1, 1) if linear else weight.shape[2:]
+    is_pointwise = linear or (is_standard and (kernel_h, kernel_w) == (1, 1))
 
-    if is_depthwise:
+    if is_pointwise:
+        packed_weight_tensor = weight.reshape(out_channels, in_channels).contiguous()
+        weight_layout = "oi"
+        replacement_op = exir_ops.edge.pulp.quantized_pointwise.default
+    elif is_depthwise:
         packed_weight_tensor = weight.contiguous()
         weight_layout = "oihw"
         replacement_op = exir_ops.edge.pulp.quantized_depthwise_conv2d.default
@@ -204,7 +278,9 @@ def _get_convolution_replacement(
         list(padding),
     )
 
-    if not is_depthwise:
+    if is_pointwise:
+        replacement_args += (linear,)
+    elif not is_depthwise:
         scratch_bytes = 2 * PULP_NUM_CORES * in_channels * kernel_h * kernel_w
         replacement_args += (scratch_bytes,)
 

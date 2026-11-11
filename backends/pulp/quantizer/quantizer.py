@@ -64,7 +64,28 @@ class PulpConv2DCheck(PatternCheck):
         )
 
 
-PULP_PATTERNS = {(torch.ops.aten.conv2d.default,): PulpConv2DCheck}
+class PulpLinearCheck(PulpConv2DCheck):
+    @classmethod
+    def check_pattern(cls, pattern: list[Node]) -> bool:
+        if len(pattern) != 1:
+            return False
+        node = pattern[0]
+        inputs = get_first_fake_tensor(cast(Node, node.args[0]))
+        weights = get_first_fake_tensor(cast(Node, node.args[1]))
+        return (
+            inputs.dim() >= 1
+            and inputs.is_contiguous()
+            and weights.dim() == 2
+            and inputs.shape[-1] == weights.shape[1]
+            and weights.shape[0] > 0
+            and weights.shape[1] > 0
+        )
+
+
+PULP_PATTERNS = {
+    (torch.ops.aten.conv2d.default,): PulpConv2DCheck,
+    (torch.ops.aten.linear.default,): PulpLinearCheck,
+}
 
 
 class PulpQuantizer(ComposableQuantizer):

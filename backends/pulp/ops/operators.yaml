@@ -39,3 +39,9 @@
   kernels:
     - arg_meta: null
       kernel_name: pulp::dequantize_per_tensor_cluster_out
+
+- func: pulp::quantized_pointwise.out(Tensor input, Tensor weight, Tensor? bias, Tensor scales, Tensor zero_points, int[] stride, int[] padding, bool linear=False, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::quantized_pointwise_out
