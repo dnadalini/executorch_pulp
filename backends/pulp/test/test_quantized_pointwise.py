@@ -184,11 +184,13 @@ class TestPointwiseNative(unittest.TestCase):
         tmp = Path(cls.directory.name)
         backend = Path(__file__).resolve().parents[1]
         nn = backend.parents[2] / "preliminary_material/pulp-nn-example/pulp-nn/32bit"
+        shutil.copyfile(backend / "test/dma_host_stub.h", tmp / "dma_host_stub.h")
         (tmp / "pmsis.h").write_text(
             r"""
 #pragma once
 #include <stdint.h>
 #include <stdlib.h>
+#include "dma_host_stub.h"
 extern int host_core,host_fail;
 struct pi_device {int unused;}; struct pi_cluster_conf {int unused;};
 struct pi_cluster_task {void (*entry)(void*);void* arg;};

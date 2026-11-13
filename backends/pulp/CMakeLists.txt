@@ -49,6 +49,12 @@ if(PULP_GLOBAL_POOL_L1_BYTES LESS 256)
   message(FATAL_ERROR "PULP_GLOBAL_POOL_L1_BYTES must be at least 256")
 endif()
 
+option(
+  PULP_PROFILE_CONV_TRANSFERS
+  "Print standard convolution cluster-stage timings (perturbs FC profiling)"
+  OFF
+)
+
 if(EXECUTORCH_BUILD_PULP)
   if(NOT EXISTS "${PULP_NN_ROOT}/32bit/include/pulp_nn_kernels.h")
     message(FATAL_ERROR "Set PULP_NN_ROOT to the checked-in PULP-NN tree")
@@ -103,6 +109,7 @@ if(EXECUTORCH_BUILD_PULP)
   target_compile_definitions(
     pulp_kernels
     PRIVATE NUM_CORES=${PULP_NUM_CORES}
+            PULP_PROFILE_CONV_TRANSFERS=$<BOOL:${PULP_PROFILE_CONV_TRANSFERS}>
             PULP_GLOBAL_POOL_L1_BYTES=${PULP_GLOBAL_POOL_L1_BYTES}
             PULP_ACTIVATION_L1_BYTES=${PULP_ACTIVATION_L1_BYTES}
             PULP_QUANTIZATION_L1_BYTES=${PULP_QUANTIZATION_L1_BYTES}

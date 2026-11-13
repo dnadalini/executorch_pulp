@@ -5,7 +5,7 @@
 
 #include "pulp_runtime_context.h"
 
-#include <string.h>
+#include "pulp_dma.h"
 
 #include "pmsis.h"
 #include "pulp_nn_kernels.h"
@@ -107,45 +107,44 @@ static void clamp_convolution_output(PulpConv2dArgs* args) {
 
 static void cluster_conv_entry(void* context) {
   PulpConv2dArgs* fc_args = (PulpConv2dArgs*)context;
-  size_t input_bytes =
-      (size_t)fc_args->input_h * fc_args->input_w * fc_args->input_channels;
-  size_t weight_bytes = (size_t)fc_args->kernel_h * fc_args->kernel_w *
+  const uint32_t input_bytes =
+      (uint32_t)fc_args->input_h * fc_args->input_w * fc_args->input_channels;
+  const uint32_t weight_bytes = (uint32_t)fc_args->kernel_h * fc_args->kernel_w *
       fc_args->input_channels * fc_args->output_channels;
-  size_t output_bytes =
-      (size_t)fc_args->output_h * fc_args->output_w * fc_args->output_channels;
-  size_t bias_bytes =
+  const uint32_t output_bytes =
+      (uint32_t)fc_args->output_h * fc_args->output_w * fc_args->output_channels;
+  const size_t bias_bytes =
       fc_args->bias == NULL ? 0 : sizeof(int32_t) * fc_args->output_channels;
-  size_t args_bytes = sizeof(PulpConv2dArgs);
-  size_t l1_bytes = args_bytes + fc_args->scratch_bytes + input_bytes +
-      bias_bytes + weight_bytes + output_bytes;
-
+  const uint32_t input_padded = (input_bytes + 3) & ~UINT32_C(3);
+  const uint32_t weight_padded = (weight_bytes + 3) & ~UINT32_C(3);
+  const uint32_t total = sizeof(PulpConv2dArgs) + (uint32_t)fc_args->scratch_bytes +
+      bias_bytes + input_padded + weight_padded + output_bytes;
+  if (total > UINT32_MAX) { fc_args->status = -1; return; }
+  const size_t l1_bytes = (size_t)total;
   uint8_t* allocation = (uint8_t*)pi_cl_l1_malloc(0, l1_bytes);
-  if (allocation == NULL) {
-    fc_args->status = -1;
-    return;
-  }
+  if (allocation == NULL) { fc_args->status = -1; return; }
 
   PulpConv2dArgs* cluster_args = (PulpConv2dArgs*)allocation;
   *cluster_args = *fc_args;
-  uint8_t* cursor = allocation + args_bytes + fc_args->scratch_bytes;
-  // Bias precedes the byte tensors so all int32 loads remain aligned.
+  uint8_t* cursor = allocation + sizeof(PulpConv2dArgs) + fc_args->scratch_bytes;
+  // Keep the int32 bias and DMA buffers four-byte aligned.
   cluster_args->bias = NULL;
-  if (bias_bytes != 0) {
+  if (bias_bytes) {
     cluster_args->bias = (const int32_t*)cursor;
-    memcpy(cursor, fc_args->bias, bias_bytes);
+    pulp_dma_copy_in(cursor, fc_args->bias, bias_bytes);
     cursor += bias_bytes;
   }
   cluster_args->input = cursor;
-  memcpy(cursor, fc_args->input, input_bytes);
-  cursor += input_bytes;
-  cluster_args->weight = (int8_t*)cursor;
-  memcpy(cursor, fc_args->weight, weight_bytes);
-  cursor += weight_bytes;
+  pulp_dma_copy_in(cursor, fc_args->input, (size_t)input_bytes);
+  cursor += (size_t)input_padded;
+  cluster_args->weight = (const int8_t*)cursor;
+  pulp_dma_copy_in(cursor, fc_args->weight, (size_t)weight_bytes);
+  cursor += (size_t)weight_padded;
   cluster_args->output = cursor;
 
   pi_cl_team_fork(NUM_CORES, conv_worker, cluster_args);
   clamp_convolution_output(cluster_args);
-  memcpy(fc_args->output, cluster_args->output, output_bytes);
+  pulp_dma_copy_out(fc_args->output, cluster_args->output, (size_t)output_bytes);
   pi_cl_l1_free(0, allocation, l1_bytes);
   fc_args->status = 0;
 }
@@ -206,18 +205,18 @@ static void cluster_depthwise_conv_entry(void* context) {
   PulpConv2dArgs* fc_args = (PulpConv2dArgs*)context;
   // All byte counts are calculated wide before narrowing to the SDK's
   // 32-bit allocation API. The arena keeps each section four-byte aligned.
-  const uint64_t input_bytes64 =
-      (uint64_t)fc_args->input_h * fc_args->input_w * fc_args->input_channels;
-  const uint64_t kernel_size = (uint64_t)fc_args->kernel_h * fc_args->kernel_w;
-  const uint64_t weight_bytes64 = kernel_size * fc_args->output_channels;
-  const uint64_t output_bytes64 =
-      (uint64_t)fc_args->output_h * fc_args->output_w * fc_args->output_channels;
-  const uint64_t scratch_bytes64 = NUM_CORES * ((kernel_size + 3) & ~UINT64_C(3));
+  const uint32_t input_bytes64 =
+      (uint32_t)fc_args->input_h * fc_args->input_w * fc_args->input_channels;
+  const uint32_t kernel_size = (uint32_t)fc_args->kernel_h * fc_args->kernel_w;
+  const uint32_t weight_bytes64 = kernel_size * fc_args->output_channels;
+  const uint32_t output_bytes64 =
+      (uint32_t)fc_args->output_h * fc_args->output_w * fc_args->output_channels;
+  const uint32_t scratch_bytes64 = NUM_CORES * ((kernel_size + 3) & ~UINT32_C(3));
   const size_t bias_bytes =
       fc_args->bias == NULL ? 0 : sizeof(int32_t) * fc_args->output_channels;
-  const uint64_t input_padded = (input_bytes64 + 3) & ~UINT64_C(3);
-  const uint64_t weight_padded = (weight_bytes64 + 3) & ~UINT64_C(3);
-  const uint64_t total = sizeof(PulpConv2dArgs) + scratch_bytes64 +
+  const uint32_t input_padded = (input_bytes64 + 3) & ~UINT32_C(3);
+  const uint32_t weight_padded = (weight_bytes64 + 3) & ~UINT32_C(3);
+  const uint32_t total = sizeof(PulpConv2dArgs) + scratch_bytes64 +
       bias_bytes + input_padded + weight_padded + output_bytes64;
   if (total > UINT32_MAX) {
     fc_args->status = -1;
@@ -237,7 +236,7 @@ static void cluster_depthwise_conv_entry(void* context) {
   cluster_args->bias = NULL;
   if (bias_bytes != 0) {
     cluster_args->bias = (const int32_t*)cursor;
-    memcpy(cursor, fc_args->bias, bias_bytes);
+    pulp_dma_copy_in(cursor, fc_args->bias, bias_bytes);
     cursor += bias_bytes;
   }
 
@@ -245,20 +244,18 @@ static void cluster_depthwise_conv_entry(void* context) {
   cluster_args->input = cursor;
   const size_t plane_size = (size_t)fc_args->input_h * fc_args->input_w;
   for (size_t c = 0; c < fc_args->input_channels; ++c) {
-    for (size_t pixel = 0; pixel < plane_size; ++pixel) {
-      cursor[c * plane_size + pixel] =
-          fc_args->input[pixel * fc_args->input_channels + c];
-    }
+    pulp_dma_gather_channel(cursor + c * plane_size, fc_args->input + c,
+        plane_size, fc_args->input_channels);
   }
   cursor += (size_t)input_padded;
   cluster_args->weight = (const int8_t*)cursor;
-  memcpy(cursor, fc_args->weight, (size_t)weight_bytes64);
+  pulp_dma_copy_in(cursor, fc_args->weight, (size_t)weight_bytes64);
   cursor += (size_t)weight_padded;
   cluster_args->output = cursor;
 
   pi_cl_team_fork(NUM_CORES, depthwise_conv_worker, cluster_args);
   clamp_convolution_output(cluster_args);
-  memcpy(fc_args->output, cluster_args->output, (size_t)output_bytes64);
+  pulp_dma_copy_out(fc_args->output, cluster_args->output, (size_t)output_bytes64);
   pi_cl_l1_free(0, allocation, l1_bytes);
   fc_args->status = 0;
 }
@@ -303,16 +300,16 @@ static void pointwise_worker(void* context) {
 static void cluster_pointwise_entry(void* context) {
   PulpPointwiseArgs* job = (PulpPointwiseArgs*)context;
   PulpConv2dArgs* args = &job->kernel;
-  const uint64_t input_one = (uint64_t)args->input_w * args->input_h * args->input_channels;
-  const uint64_t output_one = (uint64_t)args->output_w * args->output_h * args->output_channels;
-  const uint64_t input_bytes = input_one * job->batches;
-  const uint64_t output_bytes = output_one * job->batches;
-  const uint64_t weight_bytes = (uint64_t)args->input_channels * args->output_channels;
-  const uint64_t bias_bytes = args->bias == NULL ? 0 : sizeof(int32_t) * args->output_channels;
+  const uint32_t input_one = (uint32_t)args->input_w * args->input_h * args->input_channels;
+  const uint32_t output_one = (uint32_t)args->output_w * args->output_h * args->output_channels;
+  const uint32_t input_bytes = input_one * job->batches;
+  const uint32_t output_bytes = output_one * job->batches;
+  const uint32_t weight_bytes = (uint32_t)args->input_channels * args->output_channels;
+  const uint32_t bias_bytes = args->bias == NULL ? 0 : sizeof(int32_t) * args->output_channels;
   const size_t scratch = 2 * NUM_CORES * (((size_t)args->input_channels + 3) & ~(size_t)3);
-  const uint64_t input_padded = (input_bytes + 3) & ~UINT64_C(3);
-  const uint64_t weight_padded = (weight_bytes + 3) & ~UINT64_C(3);
-  const uint64_t total = sizeof(PulpConv2dArgs) + scratch + bias_bytes + input_padded + weight_padded + output_bytes;
+  const uint32_t input_padded = (input_bytes + 3) & ~UINT32_C(3);
+  const uint32_t weight_padded = (weight_bytes + 3) & ~UINT32_C(3);
+  const uint32_t total = sizeof(PulpConv2dArgs) + scratch + bias_bytes + input_padded + weight_padded + output_bytes;
   if (total > UINT32_MAX) { args->status = -1; return; }
   uint8_t* arena = (uint8_t*)pi_cl_l1_malloc(0, (size_t)total);
   if (arena == NULL) { args->status = -1; return; }
@@ -323,14 +320,14 @@ static void cluster_pointwise_entry(void* context) {
   local->bias = NULL;
   if (bias_bytes) {
     local->bias = (const int32_t*)cursor;
-    memcpy(cursor, args->bias, (size_t)bias_bytes);
+    pulp_dma_copy_in(cursor, args->bias, (size_t)bias_bytes);
     cursor += (size_t)bias_bytes;
   }
   uint8_t* input = cursor;
-  memcpy(input, args->input, (size_t)input_bytes);
+  pulp_dma_copy_in(input, args->input, (size_t)input_bytes);
   cursor += (size_t)input_padded;
   local->weight = (const int8_t*)cursor;
-  memcpy(cursor, args->weight, (size_t)weight_bytes);
+  pulp_dma_copy_in(cursor, args->weight, (size_t)weight_bytes);
   cursor += (size_t)weight_padded;
   uint8_t* output = cursor;
   // Linear vectors use exactly H=W=1, sharing weights and bias across rows.
@@ -340,7 +337,7 @@ static void cluster_pointwise_entry(void* context) {
     pi_cl_team_fork(NUM_CORES, pointwise_worker, local);
     clamp_convolution_output(local);
   }
-  memcpy(args->output, output, (size_t)output_bytes);
+  pulp_dma_copy_out(args->output, output, (size_t)output_bytes);
   pi_cl_l1_free(0, arena, (size_t)total);
   args->status = 0;
 }

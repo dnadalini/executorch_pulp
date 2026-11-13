@@ -135,11 +135,13 @@ class TestPulpQuantizedDepthwise(unittest.TestCase):
             self.skipTest("Checked-in PULP-NN source tree is required")
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
+            shutil.copyfile(backend / "test/dma_host_stub.h", tmp / "dma_host_stub.h")
             (tmp / "pmsis.h").write_text(
                 r"""
 #pragma once
 #include <stdint.h>
 #include <stdlib.h>
+#include "dma_host_stub.h"
 extern int host_core;
 extern int host_fail_alloc;
 struct pi_device { int unused; };
