@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
 set(CMAKE_SYSTEM_NAME Generic)

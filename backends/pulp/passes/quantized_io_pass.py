@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
 from executorch.exir.pass_base import ExportPass

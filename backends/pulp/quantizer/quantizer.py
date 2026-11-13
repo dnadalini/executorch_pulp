@@ -1,7 +1,10 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
+import math
 from typing import cast
+
+import executorch.backends.pulp.ops.operators  # noqa: F401
 
 import torch
 from executorch.backends.arm._passes.arm_pass_utils import get_first_fake_tensor
@@ -82,10 +85,50 @@ class PulpLinearCheck(PulpConv2DCheck):
         )
 
 
+class PulpConvActivationCheck(PulpConv2DCheck):
+    @classmethod
+    def check_pattern(cls, pattern: list[Node]) -> bool:
+        if len(pattern) != 2 or len(pattern[0].users) != 1:
+            return False
+        conv, activation = pattern
+        check = (
+            PulpLinearCheck
+            if conv.target == torch.ops.aten.linear.default
+            else PulpConv2DCheck
+        )
+        if not check.check_pattern([conv]) or activation.args[0] is not conv:
+            return False
+        if activation.target == torch.ops.aten.hardtanh.default:
+            lower = activation.args[1] if len(activation.args) > 1 else -1.0
+            upper = activation.args[2] if len(activation.args) > 2 else 1.0
+            # Only nonnegative clipping is compatible with the unsigned kernels.
+            return lower == 0 and upper > 0 and math.isfinite(upper)
+        return True
+
+
 PULP_PATTERNS = {
     (torch.ops.aten.conv2d.default,): PulpConv2DCheck,
+    (torch.ops.pulp.conv2d_export.default,): PulpConv2DCheck,
     (torch.ops.aten.linear.default,): PulpLinearCheck,
 }
+
+for _affine in (
+    torch.ops.aten.conv2d.default,
+    torch.ops.pulp.conv2d_export.default,
+    torch.ops.aten.linear.default,
+):
+    for _activation in (
+        torch.ops.aten.relu.default,
+        torch.ops.aten.relu6.default,
+        torch.ops.aten.hardtanh.default,
+    ):
+        PULP_PATTERNS[(_affine, _activation)] = PulpConvActivationCheck
+
+
+class PulpPatternQuantizer(PatternQuantizer):
+    PARAMETER_TARGETS = PatternQuantizer.PARAMETER_TARGETS | {
+        torch.ops.pulp.conv2d_export.default
+    }
 
 
 class PulpQuantizer(ComposableQuantizer):
@@ -97,7 +140,7 @@ class PulpQuantizer(ComposableQuantizer):
             PULP_PATTERNS, support_dict_name=__name__ + ".PULP_PATTERNS"
         )
         quantizers: list[Quantizer] = [
-            PatternQuantizer(
+            PulpPatternQuantizer(
                 PULP_CONV_CONFIG,
                 node_finder=NodeTargetNodeFinder(list(targets)),
                 pattern_matcher=matcher,

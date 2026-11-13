@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 """Check DMA tiling and the actual C worker against the Python reference."""
 
 import ctypes

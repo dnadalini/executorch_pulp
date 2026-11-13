@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
 import math
@@ -36,6 +36,21 @@ def _get_convolution_replacement(
     node: Node, dialect_pass: AtenToDialectPass
 ) -> DialectNodeSpec | None:
     return _get_affine_replacement(node, dialect_pass)
+
+
+@AtenToPulpPass.register_dialect_substitution(exir_ops.edge.pulp.conv2d_export.default)
+def _get_export_convolution_replacement(
+    node: Node, dialect_pass: AtenToDialectPass
+) -> DialectNodeSpec:
+    replacement = _get_affine_replacement(node, dialect_pass)
+    if replacement is not None:
+        return replacement
+    # Unsupported/unquantized operators keep the ordinary ATen fallback.
+    input, weight, bias, stride, padding, dilation, groups = node.args
+    return DialectNodeSpec(
+        exir_ops.edge.aten.convolution.default,
+        (input, weight, bias, stride, padding, dilation, False, [0, 0], groups),
+    )
 
 
 @AtenToPulpPass.register_dialect_substitution(exir_ops.edge.aten.linear.default)
@@ -106,6 +121,9 @@ def _get_affine_replacement(
         input_node, weight_node = node.args[:2]
         bias = node.args[2] if len(node.args) > 2 else None
         stride, padding, dilation, transposed, groups = (1, 1), (0, 0), (1, 1), False, 1
+    elif node.target == exir_ops.edge.pulp.conv2d_export.default:
+        input_node, weight_node, bias, stride, padding, dilation, groups = node.args
+        transposed = False
     else:
         (
             input_node,
@@ -284,6 +302,25 @@ def _get_affine_replacement(
         scratch_bytes = 2 * PULP_NUM_CORES * in_channels * kernel_h * kernel_w
         replacement_args += (scratch_bytes,)
 
+    upper = node.meta.get("pulp_activation_upper")
+    if upper is not None:
+        # Use the same FP32 reciprocal and ties-to-even as boundary quantization.
+        maximum = int(
+            torch.round(torch.tensor(upper, dtype=torch.float32) * (1.0 / output_scale))
+            .clamp(0, 255)
+            .item()
+        )
+        names = exir_ops.edge.pulp
+        replacement_op = (
+            names.quantized_pointwise_clamp.default
+            if is_pointwise
+            else (
+                names.quantized_depthwise_conv2d_clamp.default
+                if is_depthwise
+                else names.quantized_conv2d_clamp.default
+            )
+        )
+        replacement_args += (maximum,)
     return DialectNodeSpec(replacement_op, replacement_args)
 
 

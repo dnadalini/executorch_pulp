@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 ETH Zurich and University of Bologna.
+ * Copyright (c) 2026 KU Leuven.
  * All rights reserved.
  */
 
@@ -34,6 +34,7 @@ typedef struct {
   uint16_t out_shift;
   size_t scratch_bytes;
   int status;
+  uint16_t activation_max_plus_one; // Zero disables the optional upper clamp.
 } PulpConv2dArgs;
 
 typedef struct {
@@ -65,6 +66,29 @@ typedef struct {
 int pulp_runtime_run_quantization(PulpQuantizationArgs* args);
 // Cluster entry, used only by the platform dispatcher.
 void pulp_cluster_quantization_entry(void* context);
+
+// ReLU, bounded clamp, exact GELU, or tanh GELU (kind 0, 1, 2, 3).
+typedef struct {
+  const void* input;
+  void* output;
+  size_t count;
+  float lower, upper, input_scale, output_inverse_scale;
+  int32_t input_zero_point, output_zero_point, quant_min, quant_max;
+  int kind, input_quantized, output_quantized, status;
+} PulpActivationArgs;
+int pulp_runtime_run_activation(PulpActivationArgs* args);
+void pulp_cluster_activation_entry(void* context);
+
+// Channel-tiled FP32 global average pool, logical NCHW / physical NCHW or NHWC.
+typedef struct {
+  const float* input;
+  float* output;
+  size_t batches, channels, spatial;
+  int channels_last;
+  int status;
+} PulpGlobalPoolArgs;
+int pulp_runtime_run_global_pool(PulpGlobalPoolArgs* args);
+void pulp_cluster_global_pool_entry(void* context);
 
 // Platform initialization
 int pulp_runtime_initialize(void);

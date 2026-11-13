@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
 import inspect
@@ -16,7 +16,10 @@ from executorch.exir.program._program import _transform, lift_constant_tensor_pa
 from torch.export import ExportedProgram
 from torch.export.graph_signature import InputKind
 
+from .activation_to_pulp_pass import ActivationToPulpPass
 from .aten_to_pulp_pass import AtenToPulpPass
+from .fuse_activation_pass import FuseConvActivationPass
+from .global_pool_to_pulp_pass import GlobalPoolToPulpPass
 
 
 PassClass = Type[ExportPass]
@@ -24,8 +27,11 @@ PassClass = Type[ExportPass]
 
 class _PulpLoweringPass(ExportedProgramPassBase):
     pass_classes: list[PassClass] = [
+        FuseConvActivationPass,
         FoldAndAnnotateQParamsPass,
         AtenToPulpPass,
+        ActivationToPulpPass,
+        GlobalPoolToPulpPass,
     ]
 
     def call(self, exported_program: ExportedProgram) -> ExportedProgramPassResult:

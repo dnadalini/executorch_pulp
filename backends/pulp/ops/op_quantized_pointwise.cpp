@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 ETH Zurich and University of Bologna.
+ * Copyright (c) 2026 KU Leuven.
  * All rights reserved.
  */
 
@@ -82,7 +82,7 @@ bool requantization_shift(const Tensor& scales, int& shift) {
 
 } // namespace
 
-Tensor& quantized_pointwise_out(
+static Tensor& quantized_pointwise_impl(
     KernelRuntimeContext& context,
     const Tensor& input,
     const Tensor& weight,
@@ -92,7 +92,13 @@ Tensor& quantized_pointwise_out(
     ArrayRef<int64_t> stride,
     ArrayRef<int64_t> padding,
     bool linear,
+    int64_t activation_max,
     Tensor& out) {
+  if (activation_max < 0 || activation_max > 255) {
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+
   auto invalid = [&]() { context.fail(Error::InvalidArgument); };
   if (weight.dim() != 2 || input.dim() < 1 || input.dim() > 16 ||
       out.dim() != input.dim() || input.scalar_type() != ScalarType::Byte ||
@@ -207,9 +213,63 @@ Tensor& quantized_pointwise_out(
       0,
       -1};
   args.batches = batches;
+  args.kernel.activation_max_plus_one =
+      static_cast<uint16_t>(activation_max + 1);
   if (!pulp_runtime_run_pointwise(&args)) {
     context.fail(Error::Internal);
   }
   return out;
 }
+
+Tensor& quantized_pointwise_out(
+    KernelRuntimeContext& context,
+    const Tensor& input,
+    const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
+    ArrayRef<int64_t> stride,
+    ArrayRef<int64_t> padding,
+    bool linear,
+    Tensor& out) {
+  return quantized_pointwise_impl(
+      context,
+      input,
+      weight,
+      bias,
+      scales,
+      zero_points,
+      stride,
+      padding,
+      linear,
+      255,
+      out);
+}
+
+Tensor& quantized_pointwise_clamp_out(
+    KernelRuntimeContext& context,
+    const Tensor& input,
+    const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
+    ArrayRef<int64_t> stride,
+    ArrayRef<int64_t> padding,
+    bool linear,
+    int64_t activation_max,
+    Tensor& out) {
+  return quantized_pointwise_impl(
+      context,
+      input,
+      weight,
+      bias,
+      scales,
+      zero_points,
+      stride,
+      padding,
+      linear,
+      activation_max,
+      out);
+}
+
 } // namespace pulp::native

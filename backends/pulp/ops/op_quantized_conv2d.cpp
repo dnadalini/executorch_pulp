@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 ETH Zurich and University of Bologna.
+ * Copyright (c) 2026 KU Leuven.
  * All rights reserved.
  */
 
@@ -82,7 +82,7 @@ bool requantization_shift(const Tensor& scales, int& shift) {
 
 } // namespace
 
-Tensor& quantized_conv2d_out(
+static Tensor& quantized_conv2d_impl(
     KernelRuntimeContext& context,
     const Tensor& input,
     const Tensor& weight,
@@ -92,7 +92,13 @@ Tensor& quantized_conv2d_out(
     ArrayRef<int64_t> stride,
     ArrayRef<int64_t> padding,
     int64_t scratch_bytes,
+    int64_t activation_max,
     Tensor& out) {
+  if (activation_max < 0 || activation_max > 255) {
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+
   if (input.dim() != 4 || weight.dim() != 4 || out.dim() != 4 ||
       input.size(0) != 1) {
     ET_LOG(
@@ -224,11 +230,63 @@ Tensor& quantized_conv2d_out(
       static_cast<uint16_t>(out_shift),
       static_cast<size_t>(scratch_bytes),
       -1};
+  args.activation_max_plus_one = static_cast<uint16_t>(activation_max + 1);
   if (!pulp_runtime_run_conv2d(&args)) {
     ET_LOG(Error, "pulp::quantized_conv2d cluster execution failed");
     context.fail(Error::Internal);
   }
   return out;
+}
+
+Tensor& quantized_conv2d_out(
+    KernelRuntimeContext& context,
+    const Tensor& input,
+    const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
+    ArrayRef<int64_t> stride,
+    ArrayRef<int64_t> padding,
+    int64_t scratch_bytes,
+    Tensor& out) {
+  return quantized_conv2d_impl(
+      context,
+      input,
+      weight,
+      bias,
+      scales,
+      zero_points,
+      stride,
+      padding,
+      scratch_bytes,
+      255,
+      out);
+}
+
+Tensor& quantized_conv2d_clamp_out(
+    KernelRuntimeContext& context,
+    const Tensor& input,
+    const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
+    ArrayRef<int64_t> stride,
+    ArrayRef<int64_t> padding,
+    int64_t scratch_bytes,
+    int64_t activation_max,
+    Tensor& out) {
+  return quantized_conv2d_impl(
+      context,
+      input,
+      weight,
+      bias,
+      scales,
+      zero_points,
+      stride,
+      padding,
+      scratch_bytes,
+      activation_max,
+      out);
 }
 
 } // namespace pulp::native

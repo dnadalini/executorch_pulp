@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 ETH Zurich and University of Bologna.
+ * Copyright (c) 2026 KU Leuven.
  * All rights reserved.
  */
 
@@ -86,6 +86,25 @@ static void conv_worker(void* context) {
       0);
 }
 
+// Apply a fused activation in parallel while the convolution output is in L1.
+// The PULP-NN kernel itself keeps its existing flags and numerical behavior.
+static void activation_clamp_worker(void* context) {
+  PulpConv2dArgs* args = (PulpConv2dArgs*)context;
+  const size_t count = (size_t)args->output_w * args->output_h * args->output_channels;
+  const size_t chunk = ((count + NUM_CORES - 1) / NUM_CORES + 3) & ~(size_t)3;
+  const size_t begin = chunk * pi_core_id();
+  size_t end = begin + chunk;
+  if (end > count) end = count;
+  const uint8_t maximum = (uint8_t)(args->activation_max_plus_one - 1);
+  for (size_t j = begin; j < end; ++j)
+    if (args->output[j] > maximum) args->output[j] = maximum;
+}
+
+static void clamp_convolution_output(PulpConv2dArgs* args) {
+  if (args->activation_max_plus_one && args->activation_max_plus_one < 256)
+    pi_cl_team_fork(NUM_CORES, activation_clamp_worker, args);
+}
+
 static void cluster_conv_entry(void* context) {
   PulpConv2dArgs* fc_args = (PulpConv2dArgs*)context;
   size_t input_bytes =
@@ -125,6 +144,7 @@ static void cluster_conv_entry(void* context) {
   cluster_args->output = cursor;
 
   pi_cl_team_fork(NUM_CORES, conv_worker, cluster_args);
+  clamp_convolution_output(cluster_args);
   memcpy(fc_args->output, cluster_args->output, output_bytes);
   pi_cl_l1_free(0, allocation, l1_bytes);
   fc_args->status = 0;
@@ -237,6 +257,7 @@ static void cluster_depthwise_conv_entry(void* context) {
   cluster_args->output = cursor;
 
   pi_cl_team_fork(NUM_CORES, depthwise_conv_worker, cluster_args);
+  clamp_convolution_output(cluster_args);
   memcpy(fc_args->output, cluster_args->output, (size_t)output_bytes64);
   pi_cl_l1_free(0, allocation, l1_bytes);
   fc_args->status = 0;
@@ -317,6 +338,7 @@ static void cluster_pointwise_entry(void* context) {
     local->input = input + batch * (size_t)input_one;
     local->output = output + batch * (size_t)output_one;
     pi_cl_team_fork(NUM_CORES, pointwise_worker, local);
+    clamp_convolution_output(local);
   }
   memcpy(args->output, output, (size_t)output_bytes);
   pi_cl_l1_free(0, arena, (size_t)total);
@@ -331,4 +353,26 @@ int pulp_runtime_run_pointwise(PulpPointwiseArgs* args) {
   if (!cluster_initialized) return 0;
   pi_cluster_send_task_to_cl(&cluster_device, pi_cluster_task(&task, cluster_pointwise_entry, args));
   return args->kernel.status == 0;
+}
+
+int pulp_runtime_run_activation(PulpActivationArgs* args) {
+  struct pi_cluster_task task;
+  if (args == NULL) return 0;
+  args->status = PULP_QUANTIZATION_RUNTIME_ERROR;
+  if (args->count == 0) { args->status = 0; return 1; }
+  if (!cluster_initialized) return 0;
+  pi_cluster_send_task_to_cl(&cluster_device,
+      pi_cluster_task(&task, pulp_cluster_activation_entry, args));
+  return args->status == 0;
+}
+
+int pulp_runtime_run_global_pool(PulpGlobalPoolArgs* args) {
+  struct pi_cluster_task task;
+  if (args == NULL) return 0;
+  args->status = -1;
+  if (!args->batches || !args->channels) { args->status = 0; return 1; }
+  if (!cluster_initialized || !args->spatial) return 0;
+  pi_cluster_send_task_to_cl(&cluster_device,
+      pi_cluster_task(&task, pulp_cluster_global_pool_entry, args));
+  return args->status == 0;
 }

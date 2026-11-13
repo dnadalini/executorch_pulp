@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
 import math
@@ -77,6 +77,12 @@ class PulpConvQuantizationConfig(QuantizationConfig):
     def get_output_act_qspec(
         self, node: Node | None = None
     ) -> QuantizationSpecBase | None:
+        if node is not None and node.target in (
+            torch.ops.aten.relu.default,
+            torch.ops.aten.relu6.default,
+            torch.ops.aten.hardtanh.default,
+        ):
+            node = node.args[0]
         if node is None or len(node.args) < 2:
             return None
 

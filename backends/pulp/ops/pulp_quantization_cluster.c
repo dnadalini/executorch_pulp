@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 ETH Zurich and University of Bologna. */
+/* Copyright (c) 2026 KU Leuven. */
 #include "pulp_runtime_context.h"
 #include "pmsis.h"
 

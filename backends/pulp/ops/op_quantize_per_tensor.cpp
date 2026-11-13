@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 ETH Zurich and University of Bologna. */
+/* Copyright (c) 2026 KU Leuven. */
 #include <executorch/runtime/kernel/kernel_includes.h>
 
 #include <cmath>

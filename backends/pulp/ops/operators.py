@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
@@ -494,3 +494,203 @@ def quantized_pointwise_out(
     )
     out.copy_(result)
     return out
+
+
+# The PULP-NN entry points are unchanged. The backend applies the upper clamp
+# to their uint8 L1 output before copying it back to L2.
+def _register_clamped_affine(name, params, reference, meta):
+    schema = params + ", int activation_max"
+    lib.define(f"{name}_clamp({schema}) -> Tensor")
+    lib.define(f"{name}_clamp.out({schema}, *, Tensor(a!) out) -> Tensor(a!)")
+
+    def fake(*args):
+        return meta(*args[:-1])
+
+    def compute(*args):
+        maximum = args[-1]
+        if not 0 <= maximum <= 255:
+            raise ValueError("PULP activation_max must be in [0, 255]")
+        return reference(*args[:-1]).clamp(max=maximum)
+
+    def compute_out(*args, out):
+        result = compute(*args)
+        fmt = (
+            torch.channels_last
+            if result.dim() == 4
+            and result.is_contiguous(memory_format=torch.channels_last)
+            else torch.contiguous_format
+        )
+        out.resize_(result.shape, memory_format=fmt)
+        out.copy_(result)
+        return out
+
+    register_fake(f"pulp::{name}_clamp")(fake)
+    impl(lib, f"{name}_clamp", "CompositeExplicitAutograd")(compute)
+    impl(lib, f"{name}_clamp.out", "CompositeExplicitAutograd")(compute_out)
+
+
+_affine_params = "Tensor input, Tensor weight, Tensor? bias, Tensor scales, Tensor zero_points, int[] stride, int[] padding"
+_register_clamped_affine(
+    "quantized_conv2d",
+    _affine_params + ", int scratch_bytes",
+    quantized_conv2d_impl,
+    quantized_conv2d_meta,
+)
+_register_clamped_affine(
+    "quantized_depthwise_conv2d",
+    _affine_params,
+    quantized_depthwise_conv2d_impl,
+    quantized_depthwise_conv2d_meta,
+)
+_register_clamped_affine(
+    "quantized_pointwise",
+    _affine_params + ", bool linear",
+    quantized_pointwise_impl,
+    quantized_pointwise_meta,
+)
+
+
+_activation_params = "Tensor input, int kind, float min_val, float max_val, float input_scale, int input_zero_point, float output_scale, int output_zero_point, int quant_min, int quant_max, bool quantized_output"
+lib.define(f"activation_cluster({_activation_params}) -> Tensor")
+lib.define(
+    f"activation_cluster.out({_activation_params}, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+@register_fake("pulp::activation_cluster")
+def activation_cluster_meta(
+    input,
+    kind,
+    min_val,
+    max_val,
+    input_scale,
+    input_zero_point,
+    output_scale,
+    output_zero_point,
+    quant_min,
+    quant_max,
+    quantized_output,
+):
+    return torch.empty_like(
+        input, dtype=torch.uint8 if quantized_output else torch.float32
+    )
+
+
+@impl(lib, "activation_cluster", "CompositeExplicitAutograd")
+def activation_cluster_impl(
+    input,
+    kind,
+    min_val,
+    max_val,
+    input_scale,
+    input_zero_point,
+    output_scale,
+    output_zero_point,
+    quant_min,
+    quant_max,
+    quantized_output,
+):
+    if input.dtype not in (torch.float32, torch.uint8) or kind not in (0, 1, 2, 3):
+        raise ValueError(
+            "PULP activation requires FP32/UINT8 and a supported activation kind"
+        )
+    if math.isnan(min_val) or math.isnan(max_val) or min_val > max_val:
+        raise ValueError("Invalid PULP activation bounds")
+    if input.dtype == torch.uint8:
+        _check_qparams(input_scale, input_zero_point, 0, 255, torch.uint8)
+        value = (input.float() - input_zero_point) * input_scale
+    else:
+        value = input
+    if kind in (0, 1):
+        value = value.clamp(min_val, max_val)
+    else:
+        value = F.gelu(value, approximate="none" if kind == 2 else "tanh")
+    if quantized_output:
+        value = quantize_impl(
+            value, output_scale, output_zero_point, quant_min, quant_max, torch.uint8
+        )
+    return value
+
+
+@impl(lib, "activation_cluster.out", "CompositeExplicitAutograd")
+def activation_cluster_out_impl(*args, out):
+    value = activation_cluster_impl(*args)
+    fmt = (
+        torch.channels_last
+        if value.dim() == 4 and value.is_contiguous(memory_format=torch.channels_last)
+        else torch.contiguous_format
+    )
+    out.resize_(value.shape, memory_format=fmt)
+    out.copy_(value)
+    return out
+
+
+lib.define("global_avg_pool2d(Tensor input, bool keepdim=False) -> Tensor")
+lib.define(
+    "global_avg_pool2d.out(Tensor input, bool keepdim=False, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+@register_fake("pulp::global_avg_pool2d")
+def global_avg_pool2d_meta(input, keepdim=False):
+    shape = (input.shape[0], input.shape[1], 1, 1) if keepdim else input.shape[:2]
+    return torch.empty(shape, dtype=torch.float32, device=input.device)
+
+
+@impl(lib, "global_avg_pool2d", "CompositeExplicitAutograd")
+def global_avg_pool2d_impl(input, keepdim=False):
+    if (
+        input.dtype != torch.float32
+        or input.dim() != 4
+        or input.shape[2] == 0
+        or input.shape[3] == 0
+    ):
+        raise ValueError(
+            "PULP global average pool requires FP32 NCHW tensors with nonempty spatial dimensions"
+        )
+    if not (
+        input.is_contiguous() or input.is_contiguous(memory_format=torch.channels_last)
+    ):
+        raise ValueError(
+            "PULP global average pool requires contiguous NCHW or NHWC storage"
+        )
+    return input.mean(dim=(2, 3), keepdim=keepdim).contiguous()
+
+
+@impl(lib, "global_avg_pool2d.out", "CompositeExplicitAutograd")
+def global_avg_pool2d_out_impl(input, keepdim=False, *, out):
+    result = global_avg_pool2d_impl(input, keepdim)
+    out.resize_(result.shape)
+    out.copy_(result)
+    return out
+
+
+# Export-only: preserve a fixed channels-last layout across singleton spatial
+# dimensions. CPU convolution's backend-dependent fake strides add guards that
+# can otherwise exclude valid image sizes. No runtime registration is needed.
+lib.define(
+    "conv2d_export(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, int groups) -> Tensor"
+)
+
+
+@register_fake("pulp::conv2d_export")
+def conv2d_export_meta(input, weight, bias, stride, padding, dilation, groups):
+    h = (
+        input.shape[2] + 2 * padding[0] - dilation[0] * (weight.shape[2] - 1) - 1
+    ) // stride[0] + 1
+    w = (
+        input.shape[3] + 2 * padding[1] - dilation[1] * (weight.shape[3] - 1) - 1
+    ) // stride[1] + 1
+    return torch.empty(
+        (input.shape[0], weight.shape[0], h, w),
+        dtype=input.dtype,
+        device=input.device,
+        memory_format=torch.channels_last,
+    )
+
+
+@impl(lib, "conv2d_export", "CompositeExplicitAutograd")
+def conv2d_export_impl(input, weight, bias, stride, padding, dilation, groups):
+    return F.conv2d(input, weight, bias, stride, padding, dilation, groups).to(
+        memory_format=torch.channels_last
+    )

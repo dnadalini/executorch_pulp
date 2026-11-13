@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 ETH Zurich and University of Bologna.
+ * Copyright (c) 2026 KU Leuven.
  * All rights reserved.
  */
 
@@ -82,7 +82,7 @@ bool requantization_shift(const Tensor& scales, int& shift) {
 
 } // namespace
 
-Tensor& quantized_depthwise_conv2d_out(
+static Tensor& quantized_depthwise_conv2d_impl(
     KernelRuntimeContext& context,
     const Tensor& input,
     const Tensor& weight,
@@ -91,12 +91,19 @@ Tensor& quantized_depthwise_conv2d_out(
     const Tensor& zero_points,
     ArrayRef<int64_t> stride,
     ArrayRef<int64_t> padding,
+    int64_t activation_max,
     Tensor& out) {
+  if (activation_max < 0 || activation_max > 255) {
+    context.fail(Error::InvalidArgument);
+    return out;
+  }
+
   if (input.dim() != 4 || weight.dim() != 4 || out.dim() != 4 ||
       input.size(0) != 1) {
     ET_LOG(
         Error,
-        "pulp::quantized_depthwise_conv2d expects 4-D tensors and batch size 1");
+        "pulp::quantized_depthwise_conv2d expects 4-D tensors and batch "
+        "size 1");
     context.fail(Error::InvalidArgument);
     return out;
   }
@@ -105,7 +112,8 @@ Tensor& quantized_depthwise_conv2d_out(
       out.scalar_type() != ScalarType::Byte) {
     ET_LOG(
         Error,
-        "pulp::quantized_depthwise_conv2d expects uint8 input/output and int8 weight");
+        "pulp::quantized_depthwise_conv2d expects uint8 input/output and "
+        "int8 weight");
     context.fail(Error::InvalidArgument);
     return out;
   }
@@ -114,14 +122,16 @@ Tensor& quantized_depthwise_conv2d_out(
           weight.dim_order().data(), weight.dim_order().size())) {
     ET_LOG(
         Error,
-        "pulp::quantized_depthwise_conv2d received an incompatible tensor layout");
+        "pulp::quantized_depthwise_conv2d received an incompatible tensor "
+        "layout");
     context.fail(Error::InvalidArgument);
     return out;
   }
   if (stride.size() != 2 || padding.size() != 2) {
     ET_LOG(
         Error,
-        "pulp::quantized_depthwise_conv2d received invalid convolution parameters");
+        "pulp::quantized_depthwise_conv2d received invalid convolution "
+        "parameters");
     context.fail(Error::InvalidArgument);
     return out;
   }
@@ -149,7 +159,8 @@ Tensor& quantized_depthwise_conv2d_out(
   if (!requantization_shift(scales, out_shift)) {
     ET_LOG(
         Error,
-        "pulp::quantized_depthwise_conv2d requires power-of-two requantization");
+        "pulp::quantized_depthwise_conv2d requires power-of-two "
+        "requantization");
     context.fail(Error::InvalidArgument);
     return out;
   }
@@ -217,11 +228,59 @@ Tensor& quantized_depthwise_conv2d_out(
       static_cast<uint16_t>(out_shift),
       0 /* Runtime derives depthwise scratch from the current dimensions. */,
       -1};
+  args.activation_max_plus_one = static_cast<uint16_t>(activation_max + 1);
   if (!pulp_runtime_run_depthwise_conv2d(&args)) {
     ET_LOG(Error, "pulp::quantized_depthwise_conv2d cluster execution failed");
     context.fail(Error::Internal);
   }
   return out;
+}
+
+Tensor& quantized_depthwise_conv2d_out(
+    KernelRuntimeContext& context,
+    const Tensor& input,
+    const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
+    ArrayRef<int64_t> stride,
+    ArrayRef<int64_t> padding,
+    Tensor& out) {
+  return quantized_depthwise_conv2d_impl(
+      context,
+      input,
+      weight,
+      bias,
+      scales,
+      zero_points,
+      stride,
+      padding,
+      255,
+      out);
+}
+
+Tensor& quantized_depthwise_conv2d_clamp_out(
+    KernelRuntimeContext& context,
+    const Tensor& input,
+    const Tensor& weight,
+    const executorch::aten::optional<Tensor>& bias,
+    const Tensor& scales,
+    const Tensor& zero_points,
+    ArrayRef<int64_t> stride,
+    ArrayRef<int64_t> padding,
+    int64_t activation_max,
+    Tensor& out) {
+  return quantized_depthwise_conv2d_impl(
+      context,
+      input,
+      weight,
+      bias,
+      scales,
+      zero_points,
+      stride,
+      padding,
+      activation_max,
+      out);
 }
 
 } // namespace pulp::native

@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 """Pointwise/linear lowering and the actual output-channel-parallel C kernel."""
 
 import ctypes
@@ -40,7 +40,11 @@ class ConvArgs(ctypes.Structure):
                 "out_shift",
             )
         ]
-        + [("scratch_bytes", ctypes.c_size_t), ("status", ctypes.c_int)]
+        + [
+            ("scratch_bytes", ctypes.c_size_t),
+            ("status", ctypes.c_int),
+            ("activation_max_plus_one", ctypes.c_uint16),
+        ]
     )
 
 
@@ -216,7 +220,7 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s,int k,int l,int shift){return ho
 """
         )
         (tmp / "host.c").write_text(
-            "int host_core,host_fail; void pulp_nn_conv_Ho_parallel_i32_bias(void){} void pulp_nn_depthwise_generic_i32_bias(void){} void pulp_cluster_quantization_entry(void*p){(void)p;}\n"
+            "int host_core,host_fail; void pulp_nn_conv_Ho_parallel_i32_bias(void){} void pulp_nn_depthwise_generic_i32_bias(void){} void pulp_cluster_global_pool_entry(void *p){(void)p;} void pulp_cluster_activation_entry(void *p){(void)p;} void pulp_cluster_quantization_entry(void*p){(void)p;}\n"
         )
         library = tmp / "pointwise.so"
         subprocess.run(
@@ -311,6 +315,12 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s,int k,int l,int shift){return ho
                 expected += bias.to(torch.int64).reshape(1, -1, 1, 1)
             torch.testing.assert_close(
                 out, (expected >> 3).clamp(0, 255).to(torch.uint8), rtol=0, atol=0
+            )
+            maximum = (0, 1, 17, 255)[index % 4]
+            args.kernel.activation_max_plus_one = maximum + 1
+            self.assertEqual(self.lib.pulp_runtime_run_pointwise(ctypes.byref(args)), 1)
+            torch.testing.assert_close(
+                out, (expected >> 3).clamp(0, maximum).to(torch.uint8), rtol=0, atol=0
             )
         ctypes.c_int.in_dll(self.lib, "host_fail").value = 1
         self.assertEqual(self.lib.pulp_runtime_run_pointwise(ctypes.byref(args)), 0)

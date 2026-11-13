@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ETH Zurich and University of Bologna.
+# Copyright (c) 2026 KU Leuven.
 # All rights reserved.
 
 import ctypes
@@ -173,7 +173,7 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s, int k, int l, int shift) { retu
 """
             )
             (tmp / "host.c").write_text(
-                "int host_core; int host_fail_alloc; void pulp_nn_conv_Ho_parallel_i32_bias(void) {} void pulp_nn_pointwise_Co_parallel_i32_bias(void) {} void pulp_cluster_quantization_entry(void *p) { (void)p; }\n"
+                "int host_core; int host_fail_alloc; void pulp_nn_conv_Ho_parallel_i32_bias(void) {} void pulp_nn_pointwise_Co_parallel_i32_bias(void) {} void pulp_cluster_global_pool_entry(void *p){(void)p;} void pulp_cluster_activation_entry(void *p){(void)p;} void pulp_cluster_quantization_entry(void *p) { (void)p; }\n"
             )
             library_path = tmp / "depthwise.so"
             subprocess.run(
@@ -227,7 +227,11 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s, int k, int l, int shift) { retu
                             "out_shift",
                         )
                     ]
-                    + [("scratch_bytes", ctypes.c_size_t), ("status", ctypes.c_int)]
+                    + [
+                        ("scratch_bytes", ctypes.c_size_t),
+                        ("status", ctypes.c_int),
+                        ("activation_max_plus_one", ctypes.c_uint16),
+                    ]
                 )
 
             lib.pulp_runtime_run_depthwise_conv2d.argtypes = [ctypes.POINTER(Args)]
@@ -295,6 +299,14 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s, int k, int l, int shift) { retu
                     expected += bias.to(torch.int64).reshape(1, -1, 1, 1)
                 torch.testing.assert_close(
                     out, (expected >> 3).clamp(0, 255).to(torch.uint8)
+                )
+                maximum = (0, 1, 17, 255)[index % 4]
+                args.activation_max_plus_one = maximum + 1
+                self.assertEqual(
+                    lib.pulp_runtime_run_depthwise_conv2d(ctypes.byref(args)), 1
+                )
+                torch.testing.assert_close(
+                    out, (expected >> 3).clamp(0, maximum).to(torch.uint8)
                 )
             ctypes.c_int.in_dll(lib, "host_fail_alloc").value = 1
             self.assertEqual(

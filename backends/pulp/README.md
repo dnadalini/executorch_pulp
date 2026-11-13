@@ -88,6 +88,140 @@ point 0 therefore makes PULP-NN's padding numerically correct. This MVP cannot
 represent negative input activations; a later fused batch-normalization/ReLU
 path can naturally preserve this unsigned activation contract.
 
+## Export across singleton spatial dimensions
+
+Host CPU convolution's fake implementation can choose different output strides
+when a downsampled spatial dimension changes from one to two. For example,
+MobileNet input dimensions in `[16,32]` produce an intermediate dimension
+`ceil(input / 16)` in `[1,2]`. An export traced at 32 can otherwise introduce
+layout guards requiring inputs of at least 17, even though the model supports 16.
+
+For these ranges, fold eval batchnorm, prepare channels-last input/weights,
+and use the PULP export helpers:
+
+```python
+from executorch.backends.pulp.export import (
+    prepare_for_pulp_export,
+    pulp_export_context,
+)
+
+model = prepare_for_pulp_export(model.eval().to(memory_format=torch.channels_last))
+with pulp_export_context():
+    # Keep this scope around export, PT2E preparation/conversion, re-export,
+    # to_edge, and PulpPassManager.
+    exported = torch.export.export(model, (example_input,), dynamic_shapes=shapes)
+    # ... existing quantization and PULP lowering ...
+```
+
+The helper wraps ordinary zero-padding `nn.Conv2d` modules with the temporary
+`pulp::conv2d_export` operator. Its eager reference performs the same convolution;
+its fake kernel computes channels-last strides explicitly, independent of the
+host CPU's backend selection. Standard/depthwise/pointwise quantization and
+activation fusion recognize it and lower it to the existing runtime kernels.
+An unquantized remainder is translated back to ordinary ATen convolution.
+The temporary operator has no device registration and must not survive lowering.
+Convolution subclasses, string padding, and nonzero padding modes retain their
+existing implementations.
+
+`pulp_export_context()` enables PyTorch's scoped size-oblivious symbolic reasoning
+to avoid unnecessary singleton stride guards in elementwise operators too. It
+restores the previous setting on exit. It does not disable shape constraints:
+out-of-range inputs are still rejected. The MobileNet generator uses both
+helpers and retains the complete requested dynamic range.
+
+## Activation fusion and cluster fallback
+
+PT2E recognizes single-consumer convolution/linear followed by ReLU, ReLU6,
+or `hardtanh(min_val=0, max_val>0)`. This covers standard, depthwise, and
+pointwise convolution, including MobileNet's `hardtanh(0, 6)` representation
+of ReLU6. The output quantizer belongs to the complete affine/activation
+pattern. Regenerate the PTE with `PulpQuantizer` and `PulpPassManager` to enable
+these patterns.
+
+ReLU needs no additional computation: the existing UINT8, zero-point-zero
+convolution output already saturates negative accumulators to zero. Bounded
+activations select `pulp::quantized_conv2d_clamp`,
+`pulp::quantized_depthwise_conv2d_clamp`, or
+`pulp::quantized_pointwise_clamp`. The backend applies the quantized upper
+bound in parallel to the L1 output before the existing L2 copy, within the
+same cluster dispatch and allocation. PULP-NN sources, flags, and requantization
+are unchanged. The bound is `clamp(round_even(max_val / output_scale), 0, 255)`;
+like other quantized values, a dequantized ReLU6 cap follows the output scale's
+grid and need not be exactly 6. Older, unfused operator schemas are retained.
+
+Fusion is skipped when the affine output is shared or the activation is not
+a supported unsigned clamp. Remaining FP32 ReLU, ReLU6/hardtanh (including
+signed bounds), and GELU lower to `pulp::activation_cluster`. Its `kind`
+selects ReLU (0), hardtanh (1), erf GELU (2), or tanh GELU (3). GELU is a
+standalone nonlinear operation; it is not folded into PULP-NN convolution.
+
+The activation kernel supports FP32 or per-tensor affine UINT8 input/output,
+preserving physical tensor order. Lowering absorbs an input dequantizer and
+an exclusive output quantizer when present, so dequantization, activation,
+and requantization share one cluster invocation without an intermediate L2
+FP32 tensor. Shared conversion nodes remain available to other consumers.
+Quantization retains ties-to-even rounding, clipping, and the existing UINT8
+parameter checks; FP32 activations preserve negative outputs when applicable.
+GELU uses FP32 `erff`/`tanhf` from libm; normal floating-point roundoff can
+differ from the host PyTorch implementation.
+
+Every standalone activation owns its DMA staging and L1 arena. The configurable
+`PULP_ACTIVATION_L1_BYTES` budget defaults to 32768 bytes (minimum 256), including
+the tile descriptor and input/output buffers. Each element needs 2, 5, or 8
+buffer bytes depending on the UINT8/FP32 input/output combination. Capacity is
+rounded down to four elements, capped at 16380 elements for DMA command limits,
+and reduced on allocation failure. Tiles run sequentially; each tile is DMA'd
+to L1, divided among cluster cores, and DMA'd back to L2. GELU/activation
+arithmetic is never dispatched on the FC.
+
+Batchnorm folding and standalone batchnorm are deferred. Eval-mode batchnorm
+with fixed statistics can be folded into constant weights/bias before
+quantization, as the MobileNet test already does; training batchnorm cannot
+use that transformation. A remaining batchnorm between convolution and
+activation prevents direct fusion in this pass.
+
+## Channel-tiled global average pooling
+
+`GlobalPoolToPulpPass` replaces FP32 rank-four `aten.mean.dim` over logical
+spatial dimensions `(2, 3)` (including equivalent negative axes) with
+`pulp::global_avg_pool2d`. Global `adaptive_avg_pool2d(..., (1, 1))` is also
+supported. Other axes, dtypes, and adaptive-pooling output sizes retain their
+existing operators. Pooling handles dynamic positive height/width, multiple
+batches, and either `[N,C]` or `keepdim=True` `[N,C,1,1]` output.
+
+The operator reads contiguous NCHW or channels-last NHWC input directly.
+Layout-only copies immediately before the pool can be bypassed for this
+consumer. Channel groups in NHWC are gathered with 2D DMA; strides too large
+for the DMA hardware use bounded per-pixel transfers instead. Quantization
+boundaries remain explicit: this version pools FP32 tensors, including the
+dequantized outputs of PULP-NN layers.
+
+`PULP_GLOBAL_POOL_L1_BYTES` defaults to 32768 bytes, with a minimum of 256.
+For an L1 tile of `Ct` channels and `Pt` spatial positions, the arena contains
+an aligned descriptor, `4 * Ct * Pt` input bytes, and `4 * Ct` accumulator/output
+bytes. The initial tile maximizes the number of **complete channel planes**
+that fit this budget and the DMA payload limit. Channels are distributed
+across the cluster cores, with one core owning each channel's accumulation.
+
+If even one complete spatial plane exceeds the budget, the kernel additionally
+chunks the spatial dimension, retaining partial sums in L1. It initially keeps
+up to `NUM_CORES` channels in this case, to use the cores in parallel. Allocation
+failure retries with fewer channels, then fewer spatial positions. Every DMA
+payload is bounded to 65520 bytes. Each channel tile is loaded, reduced across
+all its spatial chunks, divided by the full spatial size, and written back to
+L2. Batches and tiles run sequentially inside one cluster dispatch. No pooling
+arithmetic or floating-point division runs on the FC.
+
+Accumulation and normalization use FP32. Floating-point reduction order can
+differ from host PyTorch, so comparisons should use FP32 tolerances rather
+than require bitwise equality. The `1x1` case uses the same operator and runtime
+shape handling as larger spatial inputs; it does not specialize away the
+ability to perform real dynamic global pooling.
+
+The implementation, registration, and lowering are covered by
+`test_global_avg_pool2d.py`, including dynamic shapes, both layouts, channel
+tails, spatial chunking, allocation retries, and serialization.
+
 ## DMA-tiled cluster quantization
 
 New exports lower activation conversions to distinct operators:
