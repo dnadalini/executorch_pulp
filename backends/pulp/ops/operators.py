@@ -634,7 +634,7 @@ lib.define(
 @register_fake("pulp::global_avg_pool2d")
 def global_avg_pool2d_meta(input, keepdim=False):
     shape = (input.shape[0], input.shape[1], 1, 1) if keepdim else input.shape[:2]
-    return torch.empty(shape, dtype=torch.float32, device=input.device)
+    return torch.empty(shape, dtype=input.dtype, device=input.device)
 
 
 @impl(lib, "global_avg_pool2d", "CompositeExplicitAutograd")
@@ -735,3 +735,7 @@ def add_cluster_out_impl(self, other, alpha=1.0, *, out):
     out.resize_(result.shape, memory_format=fmt)
     out.copy_(result)
     return out
+
+
+# Register the integer functional/out schemas alongside the FP32 operators.
+from . import integer_ops  # noqa: F401

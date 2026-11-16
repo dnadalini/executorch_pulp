@@ -63,6 +63,14 @@ option(
   OFF
 )
 
+set(PULP_INTEGER_L1_BYTES
+    32768
+    CACHE STRING "Maximum L1 arena bytes for integer affine operators"
+)
+if(PULP_INTEGER_L1_BYTES LESS 256)
+  message(FATAL_ERROR "PULP_INTEGER_L1_BYTES must be at least 256")
+endif()
+
 if(EXECUTORCH_BUILD_PULP)
   if(NOT EXISTS "${PULP_NN_ROOT}/32bit/include/pulp_nn_kernels.h")
     message(FATAL_ERROR "Set PULP_NN_ROOT to the checked-in PULP-NN tree")
@@ -106,12 +114,14 @@ if(EXECUTORCH_BUILD_PULP)
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_global_avg_pool2d.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_add_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_add_cluster.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_integer_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_integer.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
   )
   # Legacy conversions and cluster-op wrappers run on the FC without an FPU. The
   # quantization, activation, and pooling C workers execute FP32 on the cluster.
   set_source_files_properties(
-    ops/op_add_cluster.cpp ops/op_global_avg_pool2d.cpp
+    ops/op_integer.cpp ops/op_add_cluster.cpp ops/op_global_avg_pool2d.cpp
     ops/op_activation_cluster.cpp ops/op_quantize_per_tensor.cpp
     ops/op_quantize_per_tensor_cluster.cpp
     PROPERTIES COMPILE_OPTIONS "-march=rv32imc_xpulpv3"
@@ -121,6 +131,7 @@ if(EXECUTORCH_BUILD_PULP)
     pulp_kernels
     PRIVATE NUM_CORES=${PULP_NUM_CORES}
             PULP_PROFILE_CONV_TRANSFERS=$<BOOL:${PULP_PROFILE_CONV_TRANSFERS}>
+            PULP_INTEGER_L1_BYTES=${PULP_INTEGER_L1_BYTES}
             PULP_ADD_L1_BYTES=${PULP_ADD_L1_BYTES}
             PULP_GLOBAL_POOL_L1_BYTES=${PULP_GLOBAL_POOL_L1_BYTES}
             PULP_ACTIVATION_L1_BYTES=${PULP_ACTIVATION_L1_BYTES}

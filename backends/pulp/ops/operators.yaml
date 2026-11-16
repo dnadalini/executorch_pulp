@@ -81,3 +81,21 @@
   kernels:
     - arg_meta: null
       kernel_name: pulp::add_cluster_out
+
+- func: pulp::quantized_add.out(Tensor self, Tensor other, Tensor params, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::quantized_add_out
+
+- func: pulp::requantize_per_tensor.out(Tensor input, Tensor params, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::requantize_per_tensor_out
+
+- func: pulp::quantized_global_avg_pool2d.out(Tensor input, Tensor params, bool keepdim=False, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::quantized_global_avg_pool2d_out

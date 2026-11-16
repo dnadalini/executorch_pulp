@@ -51,8 +51,10 @@ It decodes the float32 buffers with integer arithmetic so the fabric controller
 does not need floating-point instructions or floating-point underflow handling.
 These parameters were previously folded into a scalar shift and discarded;
 their absence from the final graph did not mean quantization was absent.
-Arbitrary scale ratios, nonzero zero points, per-channel scaling, and signed
-activation I/O are still outside this backend's supported quantization contract.
+For the PULP-NN convolution/linear operators, arbitrary scale ratios, nonzero
+zero points, per-channel scaling, and signed activation I/O remain unsupported.
+The integer add, requantization and pooling operators described below accept
+independent per-tensor scales and nonzero UINT8 zero points.
 
 The original PULP-NN kernel reads each bias with `*bias++`, widening **one** int8
 value per output channel; it does not reinterpret four bytes as an int32 bias.
@@ -180,7 +182,7 @@ quantization, as the MobileNet test already does; training batchnorm cannot
 use that transformation. A remaining batchnorm between convolution and
 activation prevents direct fusion in this pass.
 
-## DMA-tiled cluster elementwise addition
+## DMA-tiled FP32 elementwise addition (fallback)
 
 Same-shaped FP32 `aten.add.Tensor` operations lower to `pulp::add_cluster`,
 including `self + alpha * other` with a constant real scalar `alpha`. Inputs
@@ -192,7 +194,7 @@ quantization/dequantization boundaries are preserved.
 `AddToPulpPass` can bypass layout-only input copies when both original operands
 have the same layout. If the add's only consumer is a copy back to that layout,
 the whole copy/add/copy pattern becomes one PULP add. Copies needed by other
-consumers are retained. MobileNet's residual connections therefore no longer
+consumers are retained. Unquantized residual connections therefore no longer
 need their two NCHW input conversions and the NHWC output conversion, including
 for singleton spatial dimensions.
 
@@ -212,7 +214,77 @@ normal floating-point roundoff can differ from a host implementation using FMA.
 shared users, scaled addition, fallback cases, serialization, tile tails,
 allocation failure/retries, and the actual C worker.
 
-## Channel-tiled global average pooling
+## UINT8 residual regions and integer pooling
+
+`PulpQuantizer()` now quantizes supported residual additions and global spatial
+means, in addition to convolutions and linear layers. Each activation input
+shares its producer's calibrated output observer; two residual branches retain
+their own scales. The add and pooling outputs have calibrated UINT8 observers.
+Layout-copy sandwiches around supported residual additions are removed before
+annotation, allowing skip tensors with multiple consumers to stay as bytes.
+`PulpQuantizer(quantize_residuals=False)` retains the previous FP32 residual/pool
+behavior for comparison. Re-export and recalibrate models to use the new path;
+existing PTEs continue to use their original operators.
+
+The new registered functional/`.out` operators are:
+
+- `pulp::quantized_add`: same-shaped, same-layout UINT8 tensors;
+- `pulp::requantize_per_tensor`: a UINT8 scale/zero-point conversion;
+- `pulp::quantized_global_avg_pool2d`: logical NCHW spatial mean, with
+  channel-first or channels-last storage, dynamic spatial dimensions and optional
+  retained singleton dimensions.
+
+For add, the real result is `sa * (a - za) + alpha * sb * (b - zb)`. Lowering
+serializes fixed-point coefficients for `sa/so` and `alpha*sb/so` in a constant
+int64 tensor. The kernel computes:
+
+```text
+v = ma * (a - za) + mb * (b - zb)
+out = clamp(round_even(v / 2**shift) + zo, qmin, qmax)
+```
+
+The parameters are `[ma, mb, shift, za, zb, zo, qmin, qmax]`. Requantization
+and pooling use `[m, shift, zi, zo, qmin, qmax]`. Zero points are affine offsets,
+not learned convolution biases. Pooling accumulates `sum(input - zi)` in int64,
+then divides the rescaled sum by the actual runtime spatial size and rounds
+once. It never pools each spatial tile independently or rounds an intermediate
+byte mean. All three native kernels use integer arithmetic; UINT8 storage does
+not mean UINT8 accumulation.
+
+The compiler chooses at least eight fractional bits and validates int64
+accumulator bounds, using the maximum exported spatial size for dynamic pooling.
+Fixed-point approximation can change the rounded result by one output quantum;
+it is not a promise of bitwise equivalence to the old FP32 residual path.
+Unrepresentable scale ratios retain an explicit floating conversion fallback.
+Direct UINT8 dequantize→quantize pairs use the integer requantization operator;
+a dequantized value shared with another consumer is retained for that consumer.
+
+The cluster workers use blocking DMA and an allocation budget controlled by
+`PULP_INTEGER_L1_BYTES` (default 32 KiB). Elementwise tiles contain an aligned
+descriptor and one byte buffer per operand, reusing the first local buffer for
+the output. Pooling fits as many full channel planes as possible; if a single
+plane does not fit, it also tiles the spatial dimension while retaining int64
+channel sums. Allocation failures retry smaller tiles. Workers partition work
+over the cluster cores and the completed byte output is DMA-transferred to L2.
+These kernels do not change PULP-NN or add convolution tiling.
+
+The supported MobileNet path can consequently keep its interior activation
+buffers in UINT8, including skip tensors, pooling and the classifier input.
+Public model input/output remain FP32, so their boundary conversions and buffers
+remain. Unsupported operators may still create floating regions; this does not
+make every arbitrary model an integer-only graph. The existing unsigned,
+zero-point-zero observer still clips negative activations, so trained-model
+accuracy must be checked after recalibration; random-weight deployment tests
+only check execution against the new quantized reference.
+
+Tests: `python -m unittest executorch.backends.pulp.test.test_integer_cluster
+executorch.backends.pulp.test.test_integer_regions` (on one command line).
+They cover exhaustive byte pairs, unequal scales and zero points, rounding,
+saturation, DMA/channel/spatial tiles, allocation retries, shared skip paths,
+dynamic pooling and serialization. Native host workers run with undefined
+behavior checks.
+
+## Channel-tiled FP32 global average pooling (fallback)
 
 `GlobalPoolToPulpPass` replaces FP32 rank-four `aten.mean.dim` over logical
 spatial dimensions `(2, 3)` (including equivalent negative axes) with

@@ -102,6 +102,19 @@ typedef struct {
 int pulp_runtime_run_add(PulpAddArgs* args);
 void pulp_cluster_add_entry(void* context);
 
+// Integer affine operation: 0=requantize, 1=add, 2=global average pool.
+typedef struct {
+  const uint8_t* input;
+  const uint8_t* other;
+  uint8_t* output;
+  size_t count, batches, channels, spatial;
+  int64_t ma, mb;
+  int shift, za, zb, zo, qmin, qmax;
+  int operation, channels_last, status;
+} PulpIntegerArgs;
+int pulp_runtime_run_integer(PulpIntegerArgs* args);
+void pulp_cluster_integer_entry(void* context);
+
 // Platform initialization
 int pulp_runtime_initialize(void);
 void pulp_runtime_shutdown(void);

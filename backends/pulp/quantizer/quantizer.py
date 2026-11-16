@@ -18,7 +18,13 @@ from executorch.backends.cortex_m.quantizer.pattern_matcher import PatternMatche
 from executorch.backends.pulp.quantizer.quantization_config import PULP_CONV_CONFIG
 from torch._ops import OpOverload
 from torch.fx import GraphModule, Node
-from torchao.quantization.pt2e.quantizer import ComposableQuantizer, Quantizer
+from torchao.quantization.pt2e.quantizer import (
+    ComposableQuantizer,
+    Quantizer,
+    SharedQuantizationSpec,
+)
+
+from .integer_regions import promote_regions, REGION_CONFIG, REGIONS
 
 
 class PulpConv2DCheck(PatternCheck):
@@ -132,7 +138,8 @@ class PulpPatternQuantizer(PatternQuantizer):
 
 
 class PulpQuantizer(ComposableQuantizer):
-    def __init__(self) -> None:
+    def __init__(self, quantize_residuals: bool = True) -> None:
+        self.quantize_residuals = quantize_residuals
         targets: set[OpOverload] = set()
         for pattern in PULP_PATTERNS:
             targets.update(pattern)
@@ -146,10 +153,52 @@ class PulpQuantizer(ComposableQuantizer):
                 pattern_matcher=matcher,
             )
         ]
+        if quantize_residuals:
+            quantizers.append(
+                PulpPatternQuantizer(
+                    REGION_CONFIG,
+                    node_finder=NodeTargetNodeFinder(list(REGIONS)),
+                    pattern_matcher=PatternMatcher({(op,): None for op in REGIONS}),
+                )
+            )
         super().__init__(quantizers)
+
+    def annotate(self, model: GraphModule) -> GraphModule:
+        model = super().annotate(model)
+        if self.quantize_residuals:
+            # Tie activation edges to their producer's calibrated output. Each
+            # operand keeps its own scale; add does not force both scales equal.
+            for node in model.graph.nodes:
+                annotation = node.meta.get("quantization_annotation")
+                if annotation is None:
+                    continue
+                indices = (
+                    (0, 1)
+                    if node.target == torch.ops.pulp.add_cluster.default
+                    else (0,)
+                )
+                for index in indices:
+                    if index >= len(node.args):
+                        continue
+                    source = node.args[index]
+                    if (
+                        not isinstance(source, Node)
+                        or source not in annotation.input_qspec_map
+                    ):
+                        continue
+                    upstream = source.meta.get("quantization_annotation")
+                    if upstream is not None and upstream.output_qspec is not None:
+                        annotation.input_qspec_map[source] = SharedQuantizationSpec(
+                            source
+                        )
+        return model
 
     def validate(self, model: GraphModule) -> None:
         return None
 
     def transform_for_annotation(self, model: GraphModule) -> GraphModule:
-        return cast(GraphModule, model)
+        return (
+            promote_regions(model)
+            if self.quantize_residuals
+            else cast(GraphModule, model)
+        )

@@ -4,6 +4,8 @@
 import math
 from typing import cast
 
+import executorch.backends.pulp.ops.integer_ops  # noqa: F401
+
 import executorch.backends.pulp.ops.operators  # noqa: F401
 import torch
 from executorch.backends.arm._passes.arm_pass_utils import get_first_fake_tensor
@@ -23,6 +25,7 @@ from executorch.exir.dialects._ops import ops as exir_ops
 from torch.export.graph_signature import InputKind
 from torch.fx import Node
 
+from .integer_region_lowering import register_integer_regions
 
 PULP_NUM_CORES = 8
 
@@ -350,3 +353,6 @@ def _get_dequantize_replacement(
     return DialectNodeSpec(
         exir_ops.edge.pulp.dequantize_per_tensor_cluster.default, node.args
     )
+
+
+register_integer_regions(AtenToPulpPass)

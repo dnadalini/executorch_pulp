@@ -21,6 +21,7 @@ from .add_to_pulp_pass import AddToPulpPass
 from .aten_to_pulp_pass import AtenToPulpPass
 from .fuse_activation_pass import FuseConvActivationPass
 from .global_pool_to_pulp_pass import GlobalPoolToPulpPass
+from .requantize_to_pulp_pass import RequantizeToPulpPass
 
 
 PassClass = Type[ExportPass]
@@ -34,6 +35,7 @@ class _PulpLoweringPass(ExportedProgramPassBase):
         ActivationToPulpPass,
         GlobalPoolToPulpPass,
         AddToPulpPass,
+        RequantizeToPulpPass,
     ]
 
     def call(self, exported_program: ExportedProgram) -> ExportedProgramPassResult:
