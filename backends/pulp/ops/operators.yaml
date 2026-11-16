@@ -75,3 +75,9 @@
   kernels:
     - arg_meta: null
       kernel_name: pulp::global_avg_pool2d_out
+
+- func: pulp::add_cluster.out(Tensor self, Tensor other, float alpha=1.0, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp::add_cluster_out

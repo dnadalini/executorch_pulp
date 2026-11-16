@@ -694,3 +694,44 @@ def conv2d_export_impl(input, weight, bias, stride, padding, dilation, groups):
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups).to(
         memory_format=torch.channels_last
     )
+
+
+lib.define("add_cluster(Tensor self, Tensor other, float alpha=1.0) -> Tensor")
+lib.define(
+    "add_cluster.out(Tensor self, Tensor other, float alpha=1.0, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+@register_fake("pulp::add_cluster")
+def add_cluster_meta(self, other, alpha=1.0):
+    return torch.empty_like(self)
+
+
+@impl(lib, "add_cluster", "CompositeExplicitAutograd")
+def add_cluster_impl(self, other, alpha=1.0):
+    if (
+        self.dtype != torch.float32
+        or other.dtype != torch.float32
+        or self.shape != other.shape
+    ):
+        raise ValueError("PULP add requires same-shaped FP32 tensors")
+    if self.dim_order() != other.dim_order():
+        raise ValueError("PULP add requires matching input layouts")
+    # torch.add may choose default strides for 1x1 NHWC inputs. Preserve the
+    # explicit layout contract of the device operator, including that case.
+    result = torch.empty_like(self)
+    result.copy_(torch.add(self, other, alpha=alpha))
+    return result
+
+
+@impl(lib, "add_cluster.out", "CompositeExplicitAutograd")
+def add_cluster_out_impl(self, other, alpha=1.0, *, out):
+    result = add_cluster_impl(self, other, alpha)
+    fmt = (
+        torch.channels_last
+        if self.dim() == 4 and self.dim_order() == (0, 2, 3, 1)
+        else torch.contiguous_format
+    )
+    out.resize_(result.shape, memory_format=fmt)
+    out.copy_(result)
+    return out

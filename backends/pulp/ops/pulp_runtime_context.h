@@ -90,6 +90,18 @@ typedef struct {
 int pulp_runtime_run_global_pool(PulpGlobalPoolArgs* args);
 void pulp_cluster_global_pool_entry(void* context);
 
+// Same-shaped FP32 addition in matching physical storage order.
+typedef struct {
+  const float* left;
+  const float* right;
+  float* output;
+  size_t count;
+  float alpha;
+  int status;
+} PulpAddArgs;
+int pulp_runtime_run_add(PulpAddArgs* args);
+void pulp_cluster_add_entry(void* context);
+
 // Platform initialization
 int pulp_runtime_initialize(void);
 void pulp_runtime_shutdown(void);

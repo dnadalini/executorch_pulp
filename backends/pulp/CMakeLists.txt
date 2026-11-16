@@ -49,6 +49,14 @@ if(PULP_GLOBAL_POOL_L1_BYTES LESS 256)
   message(FATAL_ERROR "PULP_GLOBAL_POOL_L1_BYTES must be at least 256")
 endif()
 
+set(PULP_ADD_L1_BYTES
+    32768
+    CACHE STRING "Maximum L1 arena bytes for tiled cluster addition"
+)
+if(PULP_ADD_L1_BYTES LESS 256)
+  message(FATAL_ERROR "PULP_ADD_L1_BYTES must be at least 256")
+endif()
+
 option(
   PULP_PROFILE_CONV_TRANSFERS
   "Print standard convolution cluster-stage timings (perturbs FC profiling)"
@@ -96,13 +104,16 @@ if(EXECUTORCH_BUILD_PULP)
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_quantization_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_global_pool_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_global_avg_pool2d.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_add_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_add_cluster.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
   )
   # Legacy conversions and cluster-op wrappers run on the FC without an FPU. The
   # quantization, activation, and pooling C workers execute FP32 on the cluster.
   set_source_files_properties(
-    ops/op_global_avg_pool2d.cpp ops/op_activation_cluster.cpp
-    ops/op_quantize_per_tensor.cpp ops/op_quantize_per_tensor_cluster.cpp
+    ops/op_add_cluster.cpp ops/op_global_avg_pool2d.cpp
+    ops/op_activation_cluster.cpp ops/op_quantize_per_tensor.cpp
+    ops/op_quantize_per_tensor_cluster.cpp
     PROPERTIES COMPILE_OPTIONS "-march=rv32imc_xpulpv3"
   )
   add_library(pulp_kernels ${_pulp_kernel_sources})
@@ -110,6 +121,7 @@ if(EXECUTORCH_BUILD_PULP)
     pulp_kernels
     PRIVATE NUM_CORES=${PULP_NUM_CORES}
             PULP_PROFILE_CONV_TRANSFERS=$<BOOL:${PULP_PROFILE_CONV_TRANSFERS}>
+            PULP_ADD_L1_BYTES=${PULP_ADD_L1_BYTES}
             PULP_GLOBAL_POOL_L1_BYTES=${PULP_GLOBAL_POOL_L1_BYTES}
             PULP_ACTIVATION_L1_BYTES=${PULP_ACTIVATION_L1_BYTES}
             PULP_QUANTIZATION_L1_BYTES=${PULP_QUANTIZATION_L1_BYTES}
@@ -117,9 +129,9 @@ if(EXECUTORCH_BUILD_PULP)
   # Arithmetic workers require the cluster FP32 ISA; do not compile with
   # fast-math.
   set_source_files_properties(
-    ops/pulp_global_pool_cluster.c ops/pulp_quantization_cluster.c
-    ops/pulp_activation_cluster.c PROPERTIES COMPILE_OPTIONS
-                                             "-ffp-contract=off;-fno-fast-math"
+    ops/pulp_add_cluster.c ops/pulp_global_pool_cluster.c
+    ops/pulp_quantization_cluster.c ops/pulp_activation_cluster.c
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math"
   )
   target_compile_options(pulp_kernels PRIVATE -O3)
   target_include_directories(

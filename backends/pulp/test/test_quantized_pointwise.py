@@ -222,7 +222,7 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s,int k,int l,int shift){return ho
 """
         )
         (tmp / "host.c").write_text(
-            "int host_core,host_fail; void pulp_nn_conv_Ho_parallel_i32_bias(void){} void pulp_nn_depthwise_generic_i32_bias(void){} void pulp_cluster_global_pool_entry(void *p){(void)p;} void pulp_cluster_activation_entry(void *p){(void)p;} void pulp_cluster_quantization_entry(void*p){(void)p;}\n"
+            "int host_core,host_fail; void pulp_nn_conv_Ho_parallel_i32_bias(void){} void pulp_nn_depthwise_generic_i32_bias(void){} void pulp_cluster_add_entry(void *p){(void)p;} void pulp_cluster_global_pool_entry(void *p){(void)p;} void pulp_cluster_activation_entry(void *p){(void)p;} void pulp_cluster_quantization_entry(void*p){(void)p;}\n"
         )
         library = tmp / "pointwise.so"
         subprocess.run(

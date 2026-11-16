@@ -373,3 +373,14 @@ int pulp_runtime_run_global_pool(PulpGlobalPoolArgs* args) {
       pi_cluster_task(&task, pulp_cluster_global_pool_entry, args));
   return args->status == 0;
 }
+
+int pulp_runtime_run_add(PulpAddArgs* args) {
+  struct pi_cluster_task task;
+  if (args == NULL) return 0;
+  args->status = -1;
+  if (!args->count) { args->status = 0; return 1; }
+  if (!cluster_initialized) return 0;
+  pi_cluster_send_task_to_cl(&cluster_device,
+      pi_cluster_task(&task, pulp_cluster_add_entry, args));
+  return args->status == 0;
+}

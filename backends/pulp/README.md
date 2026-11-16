@@ -180,6 +180,38 @@ quantization, as the MobileNet test already does; training batchnorm cannot
 use that transformation. A remaining batchnorm between convolution and
 activation prevents direct fusion in this pass.
 
+## DMA-tiled cluster elementwise addition
+
+Same-shaped FP32 `aten.add.Tensor` operations lower to `pulp::add_cluster`,
+including `self + alpha * other` with a constant real scalar `alpha`. Inputs
+and output use matching physical dimension order, supporting ordinary contiguous
+tensors and channels-last residual feature maps. Broadcasting, mixed dtypes,
+and incompatible layouts retain their existing ATen implementation. Existing
+quantization/dequantization boundaries are preserved.
+
+`AddToPulpPass` can bypass layout-only input copies when both original operands
+have the same layout. If the add's only consumer is a copy back to that layout,
+the whole copy/add/copy pattern becomes one PULP add. Copies needed by other
+consumers are retained. MobileNet's residual connections therefore no longer
+need their two NCHW input conversions and the NHWC output conversion, including
+for singleton spatial dimensions.
+
+`PULP_ADD_L1_BYTES` defaults to 32768 bytes (minimum 256). The arena contains an
+aligned descriptor and two FP32 buffers: `8 * tile_capacity` bytes. The left
+buffer is reused for the output, leaving the external input tensors unchanged.
+Capacity is rounded to four elements, capped at 16380 elements for DMA command
+limits, and reduced on allocation failure. There is one cluster dispatch per
+operator. Each tile performs two L2-to-L1 DMA transfers, parallel addition over
+the cluster cores, and one L1-to-L2 DMA transfer. FP32 arithmetic executes on the
+cluster, while the FC wrapper validates tensors and resizes the dynamic output.
+
+The default `alpha=1` path uses a direct FP32 addition. Scaled addition disables
+FMA contraction so multiplication and addition are separate FP32 operations;
+normal floating-point roundoff can differ from a host implementation using FMA.
+`test_add_cluster.py` checks dynamic/singleton layouts, copy elimination and
+shared users, scaled addition, fallback cases, serialization, tile tails,
+allocation failure/retries, and the actual C worker.
+
 ## Channel-tiled global average pooling
 
 `GlobalPoolToPulpPass` replaces FP32 rank-four `aten.mean.dim` over logical
