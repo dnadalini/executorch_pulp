@@ -238,6 +238,7 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s,int k,int l,int shift){return ho
                 "-I" + str(tmp),
                 "-I" + str(nn / "include"),
                 str(backend / "ops/pulp_runtime_context.c"),
+                str(backend / "ops/pulp_cluster_runtime.c"),
                 str(nn / "src/pulp_nn_pointwise_Co_parallel.c"),
                 str(nn / "src/pulp_nn_matmul.c"),
                 str(tmp / "host.c"),

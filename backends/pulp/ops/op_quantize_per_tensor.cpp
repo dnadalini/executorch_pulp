@@ -22,8 +22,11 @@ bool prepare(
     Tensor& out) {
   if (!std::isfinite(scale) || scale <= 0 ||
       !std::isfinite(static_cast<float>(scale)) ||
-      static_cast<float>(scale) <= 0 || dtype != ScalarType::Byte || qmin < 0 ||
-      qmax > 255 || qmin > zp || zp > qmax ||
+      static_cast<float>(scale) <= 0 ||
+      (dtype != ScalarType::Byte && dtype != ScalarType::Char) ||
+      qmin < (dtype == ScalarType::Char ? -128 : 0) ||
+      qmax > (dtype == ScalarType::Char ? 127 : 255) || qmin > zp ||
+      zp > qmax ||
       input.scalar_type() != (quantize ? ScalarType::Float : dtype) ||
       out.scalar_type() != (quantize ? dtype : ScalarType::Float) ||
       input.dim_order() != out.dim_order()) {
@@ -52,7 +55,7 @@ Tensor& quantize_per_tensor_out(
     return out;
   const float inverse_scale = static_cast<float>(1.0 / scale);
   const float* src = input.const_data_ptr<float>();
-  uint8_t* dst = out.mutable_data_ptr<uint8_t>();
+  uint8_t* dst = static_cast<uint8_t*>(out.mutable_data_ptr());
 
   // printf(
   //     "[quantize_per_tensor_out] input=%p output=%p scale=%g zp=%ld qmin=%ld
@@ -101,7 +104,7 @@ Tensor& dequantize_per_tensor_out(
     Tensor& out) {
   if (!prepare(ctx, input, scale, zp, qmin, qmax, dtype, false, out))
     return out;
-  const uint8_t* src = input.const_data_ptr<uint8_t>();
+  const uint8_t* src = static_cast<const uint8_t*>(input.const_data_ptr());
   float* dst = out.mutable_data_ptr<float>();
 
   // printf(
@@ -114,7 +117,11 @@ Tensor& dequantize_per_tensor_out(
   //     qmax);
 
   for (size_t i = 0; i < input.numel(); ++i) {
-    dst[i] = (static_cast<int32_t>(src[i]) - static_cast<int32_t>(zp)) *
+    dst[i] =
+        ((dtype == ScalarType::Char
+              ? static_cast<int32_t>(reinterpret_cast<const int8_t*>(src)[i])
+              : static_cast<int32_t>(src[i])) -
+         static_cast<int32_t>(zp)) *
         static_cast<float>(scale);
   }
   return out;

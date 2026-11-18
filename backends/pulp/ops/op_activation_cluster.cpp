@@ -33,17 +33,24 @@ Tensor& activation_cluster_out(
     int64_t quant_max,
     bool quantized_output,
     Tensor& out) {
-  const bool input_quantized = input.scalar_type() == ScalarType::Byte;
+  const bool input_quantized = input.scalar_type() == ScalarType::Byte ||
+      input.scalar_type() == ScalarType::Char;
+  const bool signed_input = input.scalar_type() == ScalarType::Char;
+  const bool signed_output = quant_min < 0;
   if ((!input_quantized && input.scalar_type() != ScalarType::Float) ||
       kind < 0 || kind > 3 || std::isnan(min_val) || std::isnan(max_val) ||
       min_val > max_val || input.dim_order() != out.dim_order() ||
       out.scalar_type() !=
-          (quantized_output ? ScalarType::Byte : ScalarType::Float) ||
+          (quantized_output
+               ? (signed_output ? ScalarType::Char : ScalarType::Byte)
+               : ScalarType::Float) ||
       (input_quantized &&
-       (!valid_scale(input_scale) || input_zero_point < 0 ||
-        input_zero_point > 255)) ||
+       (!valid_scale(input_scale) ||
+        input_zero_point < (signed_input ? -128 : 0) ||
+        input_zero_point > (signed_input ? 127 : 255))) ||
       (quantized_output &&
-       (!valid_scale(output_scale) || quant_min < 0 || quant_max > 255 ||
+       (!valid_scale(output_scale) || quant_min < (signed_output ? -128 : 0) ||
+        quant_max > (signed_output ? 127 : 255) ||
         quant_min > output_zero_point || output_zero_point > quant_max)) ||
       input.numel() > std::numeric_limits<size_t>::max() / sizeof(float)) {
     ctx.fail(Error::InvalidArgument);
@@ -67,8 +74,8 @@ Tensor& activation_cluster_out(
       static_cast<int32_t>(quant_min),
       static_cast<int32_t>(quant_max),
       static_cast<int>(kind),
-      input_quantized,
-      quantized_output,
+      signed_input ? 2 : input_quantized,
+      signed_output && quantized_output ? 2 : quantized_output,
       -1};
   if (!pulp_runtime_run_activation(&args)) {
     ctx.fail(

@@ -32,8 +32,8 @@ class RequantizeToPulpPass(ExportPass):
             source = node.args[0]
             if (
                 source.target not in dequantizers
-                or node.args[5] != torch.uint8
-                or source.args[5] != torch.uint8
+                or node.args[5] not in (torch.uint8, torch.int8)
+                or source.args[5] != node.args[5]
             ):
                 continue
             si, zi = source.args[1:3]

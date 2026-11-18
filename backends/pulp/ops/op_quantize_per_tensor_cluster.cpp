@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <limits>
+
 #include "pulp_runtime_context.h"
 
 namespace pulp::native {
@@ -24,8 +25,11 @@ bool prepare(
     Tensor& out) {
   if (!std::isfinite(scale) || scale <= 0 ||
       !std::isfinite(static_cast<float>(scale)) ||
-      static_cast<float>(scale) <= 0 || dtype != ScalarType::Byte || qmin < 0 ||
-      qmax > 255 || qmin > zp || zp > qmax ||
+      static_cast<float>(scale) <= 0 ||
+      (dtype != ScalarType::Byte && dtype != ScalarType::Char) ||
+      qmin < (dtype == ScalarType::Char ? -128 : 0) ||
+      qmax > (dtype == ScalarType::Char ? 127 : 255) || qmin > zp ||
+      zp > qmax ||
       input.scalar_type() != (quantize ? ScalarType::Float : dtype) ||
       out.scalar_type() != (quantize ? dtype : ScalarType::Float) ||
       input.dim_order() != out.dim_order()) {
@@ -58,14 +62,14 @@ Tensor& quantize_per_tensor_cluster_out(
   }
   PulpQuantizationArgs args{
       input.const_data_ptr<float>(),
-      out.mutable_data_ptr<uint8_t>(),
+      out.mutable_data_ptr(),
       static_cast<size_t>(input.numel()),
       static_cast<float>(scale),
       static_cast<float>(1.0 / scale),
       static_cast<int32_t>(zp),
       static_cast<int32_t>(qmin),
       static_cast<int32_t>(qmax),
-      1,
+      dtype == ScalarType::Char ? 3 : 1,
       -1};
   if (!pulp_runtime_run_quantization(&args)) {
     ctx.fail(
@@ -91,7 +95,7 @@ Tensor& dequantize_per_tensor_cluster_out(
     return out;
   }
   PulpQuantizationArgs args{
-      input.const_data_ptr<uint8_t>(),
+      input.const_data_ptr(),
       out.mutable_data_ptr<float>(),
       static_cast<size_t>(input.numel()),
       static_cast<float>(scale),
@@ -99,7 +103,7 @@ Tensor& dequantize_per_tensor_cluster_out(
       static_cast<int32_t>(zp),
       static_cast<int32_t>(qmin),
       static_cast<int32_t>(qmax),
-      0,
+      dtype == ScalarType::Char ? 2 : 0,
       -1};
   if (!pulp_runtime_run_quantization(&args))
     ctx.fail(Error::Internal);

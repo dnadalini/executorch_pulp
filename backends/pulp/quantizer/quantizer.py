@@ -138,17 +138,21 @@ class PulpPatternQuantizer(PatternQuantizer):
 
 
 class PulpQuantizer(ComposableQuantizer):
+    patterns = PULP_PATTERNS
+    conv_config = PULP_CONV_CONFIG
+    region_config = REGION_CONFIG
+
     def __init__(self, quantize_residuals: bool = True) -> None:
         self.quantize_residuals = quantize_residuals
         targets: set[OpOverload] = set()
-        for pattern in PULP_PATTERNS:
+        for pattern in self.patterns:
             targets.update(pattern)
         matcher = PatternMatcher(
-            PULP_PATTERNS, support_dict_name=__name__ + ".PULP_PATTERNS"
+            self.patterns, support_dict_name=__name__ + ".PULP_PATTERNS"
         )
         quantizers: list[Quantizer] = [
             PulpPatternQuantizer(
-                PULP_CONV_CONFIG,
+                self.conv_config,
                 node_finder=NodeTargetNodeFinder(list(targets)),
                 pattern_matcher=matcher,
             )
@@ -156,7 +160,7 @@ class PulpQuantizer(ComposableQuantizer):
         if quantize_residuals:
             quantizers.append(
                 PulpPatternQuantizer(
-                    REGION_CONFIG,
+                    self.region_config,
                     node_finder=NodeTargetNodeFinder(list(REGIONS)),
                     pattern_matcher=PatternMatcher({(op,): None for op in REGIONS}),
                 )

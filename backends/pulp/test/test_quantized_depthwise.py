@@ -192,6 +192,7 @@ static inline uint8_t pulp_nn_bn_quant_u8(int s, int k, int l, int shift) { retu
                     "-I" + str(tmp),
                     "-I" + str(kernel_root / "include"),
                     str(backend / "ops/pulp_runtime_context.c"),
+                    str(backend / "ops/pulp_cluster_runtime.c"),
                     str(kernel_root / "src/pulp_nn_depthwise_generic.c"),
                     str(tmp / "host.c"),
                     "-o",

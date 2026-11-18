@@ -105,18 +105,21 @@ if(EXECUTORCH_BUILD_PULP)
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_conv2d.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_pointwise.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantized_depthwise_conv2d.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
+  )
+  set(_pulp_common_sources
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_quantize_per_tensor_cluster.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_activation_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_activation_cluster.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_quantization_cluster.c
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_global_pool_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_global_avg_pool2d.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_add_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_add_cluster.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_integer_cluster.c
       ${CMAKE_CURRENT_SOURCE_DIR}/ops/op_integer.cpp
-      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_runtime_context.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_quantization_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_activation_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_global_pool_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_add_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_integer_cluster.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/ops/pulp_cluster_runtime.c
   )
   # Legacy conversions and cluster-op wrappers run on the FC without an FPU. The
   # quantization, activation, and pooling C workers execute FP32 on the cluster.
@@ -126,35 +129,43 @@ if(EXECUTORCH_BUILD_PULP)
     ops/op_quantize_per_tensor_cluster.cpp
     PROPERTIES COMPILE_OPTIONS "-march=rv32imc_xpulpv3"
   )
+  add_library(pulp_runtime_common ${_pulp_common_sources})
   add_library(pulp_kernels ${_pulp_kernel_sources})
-  target_compile_definitions(
+  foreach(_pulp_target pulp_kernels pulp_runtime_common)
+    target_compile_definitions(
+      ${_pulp_target}
+      PRIVATE NUM_CORES=${PULP_NUM_CORES}
+              PULP_PROFILE_CONV_TRANSFERS=$<BOOL:${PULP_PROFILE_CONV_TRANSFERS}>
+              PULP_INTEGER_L1_BYTES=${PULP_INTEGER_L1_BYTES}
+              PULP_ADD_L1_BYTES=${PULP_ADD_L1_BYTES}
+              PULP_GLOBAL_POOL_L1_BYTES=${PULP_GLOBAL_POOL_L1_BYTES}
+              PULP_ACTIVATION_L1_BYTES=${PULP_ACTIVATION_L1_BYTES}
+              PULP_QUANTIZATION_L1_BYTES=${PULP_QUANTIZATION_L1_BYTES}
+    )
+    # Arithmetic workers require the cluster FP32 ISA; do not compile with
+    # fast-math.
+    set_source_files_properties(
+      ops/pulp_add_cluster.c ops/pulp_global_pool_cluster.c
+      ops/pulp_quantization_cluster.c ops/pulp_activation_cluster.c
+      PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math"
+    )
+    target_compile_options(${_pulp_target} PRIVATE -O3)
+    target_include_directories(
+      ${_pulp_target}
+      PRIVATE ${EXECUTORCH_ROOT}/..
+              ${EXECUTORCH_ROOT}/runtime/core/portable_type/c10
+              ${PULP_NN_ROOT}/32bit/include
+    )
+    target_include_directories(
+      ${_pulp_target} PRIVATE $<$<COMPILE_LANGUAGE:C>:${PULP_SDK_INCLUDE_DIRS}>
+    )
+    target_link_libraries(${_pulp_target} PRIVATE executorch_core m)
+  endforeach()
+  target_link_libraries(
     pulp_kernels
-    PRIVATE NUM_CORES=${PULP_NUM_CORES}
-            PULP_PROFILE_CONV_TRANSFERS=$<BOOL:${PULP_PROFILE_CONV_TRANSFERS}>
-            PULP_INTEGER_L1_BYTES=${PULP_INTEGER_L1_BYTES}
-            PULP_ADD_L1_BYTES=${PULP_ADD_L1_BYTES}
-            PULP_GLOBAL_POOL_L1_BYTES=${PULP_GLOBAL_POOL_L1_BYTES}
-            PULP_ACTIVATION_L1_BYTES=${PULP_ACTIVATION_L1_BYTES}
-            PULP_QUANTIZATION_L1_BYTES=${PULP_QUANTIZATION_L1_BYTES}
+    PUBLIC pulp_runtime_common
+    PRIVATE pulp_nn
   )
-  # Arithmetic workers require the cluster FP32 ISA; do not compile with
-  # fast-math.
-  set_source_files_properties(
-    ops/pulp_add_cluster.c ops/pulp_global_pool_cluster.c
-    ops/pulp_quantization_cluster.c ops/pulp_activation_cluster.c
-    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math"
-  )
-  target_compile_options(pulp_kernels PRIVATE -O3)
-  target_include_directories(
-    pulp_kernels
-    PRIVATE ${EXECUTORCH_ROOT}/..
-            ${EXECUTORCH_ROOT}/runtime/core/portable_type/c10
-            ${PULP_NN_ROOT}/32bit/include
-  )
-  target_include_directories(
-    pulp_kernels PRIVATE $<$<COMPILE_LANGUAGE:C>:${PULP_SDK_INCLUDE_DIRS}>
-  )
-  target_link_libraries(pulp_kernels PRIVATE pulp_nn executorch_core m)
 
   set(_yaml_file ${CMAKE_CURRENT_LIST_DIR}/ops/operators.yaml)
   gen_selected_ops(LIB_NAME "pulp_ops_lib" OPS_SCHEMA_YAML "${_yaml_file}")
@@ -166,7 +177,7 @@ if(EXECUTORCH_BUILD_PULP)
   )
 
   install(
-    TARGETS pulp_nn pulp_kernels pulp_ops_lib
+    TARGETS pulp_nn pulp_kernels pulp_runtime_common pulp_ops_lib
     EXPORT ExecuTorchTargets
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )

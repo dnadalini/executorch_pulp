@@ -64,7 +64,7 @@ def _float_fallback(node, inputs, output, alpha=None):
                     int(q.zp),
                     int(q.qmin),
                     int(q.qmax),
-                    torch.uint8,
+                    q.dtype,
                 ),
             )
             for i, q in enumerate(inputs)
@@ -86,7 +86,7 @@ def _float_fallback(node, inputs, output, alpha=None):
             int(output.zp),
             int(output.qmin),
             int(output.qmax),
-            torch.uint8,
+            output.dtype,
         ),
     )
 
@@ -102,7 +102,9 @@ def register_integer_regions(pass_class):
                 "Quantized residual add needs both input quantization parameters"
             )
         qa, qb, qo = inputs[0], inputs[1], next(iter(outputs.values()))
-        if any(q.dtype != torch.uint8 for q in (qa, qb, qo)):
+        if qa.dtype not in (torch.uint8, torch.int8) or any(
+            q.dtype != qa.dtype for q in (qb, qo)
+        ):
             raise ValueError("PULP integer regions require UINT8 quantization")
         alpha = float(
             torch.tensor(
@@ -143,7 +145,7 @@ def register_integer_regions(pass_class):
             return None
         qi = get_input_qparams(node)[0]
         qo = next(iter(get_output_qparams(node).values()))
-        if qi.dtype != torch.uint8 or qo.dtype != torch.uint8:
+        if qi.dtype not in (torch.uint8, torch.int8) or qo.dtype != qi.dtype:
             raise ValueError("PULP integer pooling requires UINT8 quantization")
         try:
             spatial = _maximum_spatial(node.args[0].meta["val"])

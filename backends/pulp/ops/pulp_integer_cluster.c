@@ -29,9 +29,16 @@ static void elementwise_worker(void* context) {
   for (size_t block = pi_core_id() * 4; block < tile->count;
        block += NUM_CORES * 4) {
     for (size_t i = block; i < block + 4 && i < tile->count; ++i) {
-      int64_t value = ((int32_t)tile->input[i] - job->za) * job->ma;
-      if (job->operation == 1)
-        value += ((int32_t)tile->other[i] - job->zb) * job->mb;
+      int64_t value =
+          ((int32_t)((job->operation & 4) ? ((int8_t*)tile->input)[i]
+                                          : tile->input[i]) -
+           job->za) *
+          job->ma;
+      if ((job->operation & 3) == 1)
+        value += ((int32_t)((job->operation & 4) ? ((int8_t*)tile->other)[i]
+                                                 : tile->other[i]) -
+                  job->zb) *
+                 job->mb;
       tile->input[i] =
           pulp_integer_output(pulp_round_shift_even(value, job->shift), job->zo,
                               job->qmin, job->qmax);
@@ -48,10 +55,16 @@ static void pool_worker(void* context) {
       int64_t sum = tile->sums[c];
       if (job->channels_last) {
         for (size_t p = 0; p < tile->pixels; ++p)
-          sum += (int32_t)tile->input[p * tile->channels + c] - job->za;
+          sum += (int32_t)((job->operation & 4)
+                               ? ((int8_t*)tile->input)[p * tile->channels + c]
+                               : tile->input[p * tile->channels + c]) -
+                 job->za;
       } else {
         for (size_t p = 0; p < tile->pixels; ++p)
-          sum += (int32_t)tile->input[c * tile->pixels + p] - job->za;
+          sum += (int32_t)((job->operation & 4)
+                               ? ((int8_t*)tile->input)[c * tile->pixels + p]
+                               : tile->input[c * tile->pixels + p]) -
+                 job->za;
       }
       tile->sums[c] = sum;
       if (tile->last) {
@@ -154,12 +167,12 @@ void pulp_cluster_integer_entry(void* context) {
     job->status = 0;
     return;
   }
-  if (job->operation == 2) {
+  if ((job->operation & 3) == 2) {
     pool_entry(job);
     return;
   }
   const size_t overhead = (sizeof(IntegerTile) + 7) & ~(size_t)7;
-  const size_t buffers = job->operation == 1 ? 2 : 1;
+  const size_t buffers = (job->operation & 3) == 1 ? 2 : 1;
   if (PULP_INTEGER_L1_BYTES < overhead + buffers * 4) return;
   size_t capacity = minimum((PULP_INTEGER_L1_BYTES - overhead) / buffers,
                             PULP_DMA_MAX_BYTES) &
@@ -181,7 +194,7 @@ void pulp_cluster_integer_entry(void* context) {
   for (size_t offset = 0; offset < job->count;) {
     tile->count = minimum(capacity, job->count - offset);
     pulp_dma_copy_in(tile->input, job->input + offset, tile->count);
-    if (job->operation == 1)
+    if ((job->operation & 3) == 1)
       pulp_dma_copy_in(tile->other, job->other + offset, tile->count);
     pi_cl_team_fork(NUM_CORES, elementwise_worker, tile);
     pulp_dma_copy_out(job->output + offset, tile->input, tile->count);

@@ -49,11 +49,14 @@ for name, arguments in (
     lib.define(f"{name}.out({arguments}, *, Tensor(a!) out) -> Tensor(a!)")
 
 
-def _check(values, shift, zps, qmin, qmax, bound):
+def _check(values, shift, zps, qmin, qmax, bound, dtype=torch.uint8):
+    if dtype not in (torch.uint8, torch.int8):
+        raise ValueError("Integer kernels require INT8 or UINT8")
+    limits = torch.iinfo(dtype)
     if (
         not 8 <= shift <= 46
-        or any(not 0 <= z <= 255 for z in zps)
-        or not 0 <= qmin <= zps[-1] <= qmax <= 255
+        or any(not limits.min <= z <= limits.max for z in zps)
+        or not limits.min <= qmin <= zps[-1] <= qmax <= limits.max
     ):
         raise ValueError("Invalid UINT8 affine quantization parameters")
     if bound * sum(abs(m) for m in values) > INT64_MAX:
@@ -62,18 +65,18 @@ def _check(values, shift, zps, qmin, qmax, bound):
 
 @register_fake("pulp::quantized_add")
 def quantized_add_meta(self, other, params):
-    return torch.empty_like(self, dtype=torch.uint8)
+    return torch.empty_like(self)
 
 
 @impl(lib, "quantized_add", "CompositeExplicitAutograd")
 def quantized_add_impl(self, other, params):
     ma, mb, shift, za, zb, zo, qmin, qmax = _params(params, 8)
-    _check((ma, mb), shift, (za, zb, zo), qmin, qmax, 255)
+    _check((ma, mb), shift, (za, zb, zo), qmin, qmax, 255, self.dtype)
     if ma < 0:
         raise ValueError("The left input scale ratio must be nonnegative")
     if (
-        self.dtype != torch.uint8
-        or other.dtype != torch.uint8
+        self.dtype not in (torch.uint8, torch.int8)
+        or other.dtype != self.dtype
         or self.shape != other.shape
         or self.dim_order() != other.dim_order()
     ):
@@ -81,25 +84,25 @@ def quantized_add_impl(self, other, params):
             "Quantized add requires same-shaped UINT8 tensors in matching layouts"
         )
     value = (self.long() - za) * ma + (other.long() - zb) * mb
-    result = (rounded_divide(value, 1 << shift) + zo).clamp(qmin, qmax).byte()
+    result = (rounded_divide(value, 1 << shift) + zo).clamp(qmin, qmax).to(self.dtype)
     return torch.empty_like(self).copy_(result)
 
 
 @register_fake("pulp::requantize_per_tensor")
 def requantize_meta(input, params):
-    return torch.empty_like(input, dtype=torch.uint8)
+    return torch.empty_like(input)
 
 
 @impl(lib, "requantize_per_tensor", "CompositeExplicitAutograd")
 def requantize_impl(input, params):
     multiplier, shift, zi, zo, qmin, qmax = _params(params, 6)
-    _check((multiplier,), shift, (zi, zo), qmin, qmax, 255)
-    if input.dtype != torch.uint8 or multiplier < 0:
+    _check((multiplier,), shift, (zi, zo), qmin, qmax, 255, input.dtype)
+    if input.dtype not in (torch.uint8, torch.int8) or multiplier < 0:
         raise ValueError("Requantization requires UINT8 input and positive scale ratio")
     result = (
         (rounded_divide((input.long() - zi) * multiplier, 1 << shift) + zo)
         .clamp(qmin, qmax)
-        .byte()
+        .to(input.dtype)
     )
     return torch.empty_like(input).copy_(result)
 
@@ -107,14 +110,14 @@ def requantize_impl(input, params):
 @register_fake("pulp::quantized_global_avg_pool2d")
 def quantized_pool_meta(input, params, keepdim=False):
     shape = (*input.shape[:2], 1, 1) if keepdim else input.shape[:2]
-    return torch.empty(shape, dtype=torch.uint8, device=input.device)
+    return torch.empty(shape, dtype=input.dtype, device=input.device)
 
 
 @impl(lib, "quantized_global_avg_pool2d", "CompositeExplicitAutograd")
 def quantized_pool_impl(input, params, keepdim=False):
     multiplier, shift, zi, zo, qmin, qmax = _params(params, 6)
     if (
-        input.dtype != torch.uint8
+        input.dtype not in (torch.uint8, torch.int8)
         or input.dim() != 4
         or input.shape[2] <= 0
         or input.shape[3] <= 0
@@ -122,7 +125,7 @@ def quantized_pool_impl(input, params, keepdim=False):
     ):
         raise ValueError("Quantized pooling requires nonempty UINT8 NCHW input")
     spatial = input.shape[2] * input.shape[3]
-    _check((multiplier,), shift, (zi, zo), qmin, qmax, 255 * spatial)
+    _check((multiplier,), shift, (zi, zo), qmin, qmax, 255 * spatial, input.dtype)
     sums = (input.long() - zi).sum((2, 3), keepdim=keepdim) * multiplier
     denominator = spatial * (1 << shift)
     # If the denominator exceeds uint64, the bounded int64 numerator is < 1/2.
@@ -131,7 +134,7 @@ def quantized_pool_impl(input, params, keepdim=False):
         if denominator > (1 << 64) - 1
         else rounded_divide(sums, denominator)
     )
-    return (values + zo).clamp(qmin, qmax).byte().contiguous()
+    return (values + zo).clamp(qmin, qmax).to(input.dtype).contiguous()
 
 
 def _out(reference):

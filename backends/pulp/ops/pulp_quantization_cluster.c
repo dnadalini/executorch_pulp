@@ -1,9 +1,9 @@
 /* Copyright (c) 2026 KU Leuven. */
-#include "pulp_runtime_context.h"
-#include "pmsis.h"
-
 #include <stddef.h>
 #include <stdint.h>
+
+#include "pmsis.h"
+#include "pulp_runtime_context.h"
 
 #ifndef NUM_CORES
 #define NUM_CORES 8
@@ -33,12 +33,13 @@ static void quantization_worker(void* context) {
   QuantizationTile* tile = (QuantizationTile*)context;
   const unsigned core = pi_core_id();
   // Whole four-byte output groups avoid different cores updating one byte word.
-  const size_t chunk = ((tile->count + NUM_CORES - 1) / NUM_CORES + 3) & ~(size_t)3;
+  const size_t chunk =
+      ((tile->count + NUM_CORES - 1) / NUM_CORES + 3) & ~(size_t)3;
   const size_t begin = chunk * core;
   size_t end = begin + chunk;
   if (end > tile->count) end = tile->count;
   tile->errors[core] = 0;
-  if (tile->quantize) {
+  if (tile->quantize & 1) {
     const float lower = (float)(tile->quant_min - tile->zero_point);
     const float upper = (float)(tile->quant_max - tile->zero_point);
     for (size_t i = begin; i < end; ++i) {
@@ -63,14 +64,21 @@ static void quantization_worker(void* context) {
     }
   } else {
     for (size_t i = begin; i < end; ++i) {
-      tile->floats[i] = ((int32_t)tile->bytes[i] - tile->zero_point) * tile->multiplier;
+      tile->floats[i] =
+          ((int32_t)((tile->quantize & 2) ? ((int8_t*)tile->bytes)[i]
+                                          : tile->bytes[i]) -
+           tile->zero_point) *
+          tile->multiplier;
     }
   }
 }
 
 void pulp_cluster_quantization_entry(void* context) {
   PulpQuantizationArgs* args = (PulpQuantizationArgs*)context;
-  if (args->count == 0) { args->status = 0; return; }
+  if (args->count == 0) {
+    args->status = 0;
+    return;
+  }
   const size_t overhead = (sizeof(QuantizationTile) + 7) & ~(size_t)7;
   if (PULP_QUANTIZATION_L1_BYTES < overhead + 20) {
     args->status = PULP_QUANTIZATION_RUNTIME_ERROR;
@@ -98,7 +106,7 @@ void pulp_cluster_quantization_entry(void* context) {
   QuantizationTile* tile = (QuantizationTile*)arena;
   tile->floats = (float*)(arena + overhead);
   tile->bytes = arena + overhead + capacity * sizeof(float);
-  tile->multiplier = args->quantize ? args->inverse_scale : args->scale;
+  tile->multiplier = (args->quantize & 1) ? args->inverse_scale : args->scale;
   tile->zero_point = args->zero_point;
   tile->quant_min = args->quant_min;
   tile->quant_max = args->quant_max;
@@ -109,14 +117,16 @@ void pulp_cluster_quantization_entry(void* context) {
     if (count > capacity) count = capacity;
     tile->count = count;
     pi_cl_dma_cmd_t transfer;
-    const size_t input_item_bytes = args->quantize ? sizeof(float) : 1;
-    const size_t output_item_bytes = args->quantize ? 1 : sizeof(float);
-    void* tile_input = args->quantize ? (void*)tile->floats : (void*)tile->bytes;
-    void* tile_output = args->quantize ? (void*)tile->bytes : (void*)tile->floats;
+    const size_t input_item_bytes = (args->quantize & 1) ? sizeof(float) : 1;
+    const size_t output_item_bytes = (args->quantize & 1) ? 1 : sizeof(float);
+    void* tile_input =
+        (args->quantize & 1) ? (void*)tile->floats : (void*)tile->bytes;
+    void* tile_output =
+        (args->quantize & 1) ? (void*)tile->bytes : (void*)tile->floats;
     pi_cl_dma_cmd(
         (uintptr_t)((const uint8_t*)args->input + offset * input_item_bytes),
-        (uintptr_t)tile_input, count * input_item_bytes,
-        PI_CL_DMA_DIR_EXT2LOC, &transfer);
+        (uintptr_t)tile_input, count * input_item_bytes, PI_CL_DMA_DIR_EXT2LOC,
+        &transfer);
     pi_cl_dma_cmd_wait(&transfer);
     pi_cl_team_fork(NUM_CORES, quantization_worker, tile);
     for (unsigned core = 0; core < NUM_CORES; ++core) {

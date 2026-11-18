@@ -28,6 +28,8 @@ PassClass = Type[ExportPass]
 
 
 class _PulpLoweringPass(ExportedProgramPassBase):
+    # Optional export-time diagnostics; callbacks must not mutate the program.
+    pass_snapshot_callback = None
     pass_classes: list[PassClass] = [
         FuseConvActivationPass,
         FoldAndAnnotateQParamsPass,
@@ -40,6 +42,8 @@ class _PulpLoweringPass(ExportedProgramPassBase):
 
     def call(self, exported_program: ExportedProgram) -> ExportedProgramPassResult:
         modified = False
+        if self.pass_snapshot_callback is not None:
+            self.pass_snapshot_callback("BeforeLowering", exported_program)
         for pass_class in self.pass_classes:
             kwargs: dict[str, Any] = {}
             if "exported_program" in inspect.signature(pass_class).parameters:
@@ -47,6 +51,8 @@ class _PulpLoweringPass(ExportedProgramPassBase):
             transformed = _transform(exported_program, pass_class(**kwargs))
             modified |= transformed is not exported_program
             exported_program = transformed
+            if self.pass_snapshot_callback is not None:
+                self.pass_snapshot_callback(pass_class.__name__, exported_program)
 
         dead_constants = []
         input_specs = {
@@ -70,6 +76,8 @@ class _PulpLoweringPass(ExportedProgramPassBase):
         buffer_count = len(exported_program.graph_signature.buffers)
         exported_program = lift_constant_tensor_pass(exported_program)
         modified |= len(exported_program.graph_signature.buffers) != buffer_count
+        if self.pass_snapshot_callback is not None:
+            self.pass_snapshot_callback("FinalizeConstants", exported_program)
         return ExportedProgramPassResult(exported_program, modified)
 
 

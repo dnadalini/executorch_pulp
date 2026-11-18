@@ -293,10 +293,14 @@ for _name in ("quantize_per_tensor", "dequantize_per_tensor"):
 
 def _check_qparams(scale, zero_point, quant_min, quant_max, dtype):
     if (
-        dtype != torch.uint8
+        dtype not in (torch.uint8, torch.int8)
         or not math.isfinite(scale)
         or scale <= 0
-        or not 0 <= quant_min <= zero_point <= quant_max <= 255
+        or not (-128 if dtype == torch.int8 else 0)
+        <= quant_min
+        <= zero_point
+        <= quant_max
+        <= (127 if dtype == torch.int8 else 255)
     ):
         raise ValueError("Invalid PULP uint8 quantization parameters")
     # The native kernels consume FP32 scale parameters. Reject values that
@@ -572,7 +576,12 @@ def activation_cluster_meta(
     quantized_output,
 ):
     return torch.empty_like(
-        input, dtype=torch.uint8 if quantized_output else torch.float32
+        input,
+        dtype=(
+            (torch.int8 if quant_min < 0 else torch.uint8)
+            if quantized_output
+            else torch.float32
+        ),
     )
 
 
@@ -590,14 +599,22 @@ def activation_cluster_impl(
     quant_max,
     quantized_output,
 ):
-    if input.dtype not in (torch.float32, torch.uint8) or kind not in (0, 1, 2, 3):
+    if input.dtype not in (torch.float32, torch.uint8, torch.int8) or kind not in (
+        0,
+        1,
+        2,
+        3,
+    ):
         raise ValueError(
             "PULP activation requires FP32/UINT8 and a supported activation kind"
         )
     if math.isnan(min_val) or math.isnan(max_val) or min_val > max_val:
         raise ValueError("Invalid PULP activation bounds")
-    if input.dtype == torch.uint8:
-        _check_qparams(input_scale, input_zero_point, 0, 255, torch.uint8)
+    if input.dtype in (torch.uint8, torch.int8):
+        limits = torch.iinfo(input.dtype)
+        _check_qparams(
+            input_scale, input_zero_point, limits.min, limits.max, input.dtype
+        )
         value = (input.float() - input_zero_point) * input_scale
     else:
         value = input
@@ -607,7 +624,12 @@ def activation_cluster_impl(
         value = F.gelu(value, approximate="none" if kind == 2 else "tanh")
     if quantized_output:
         value = quantize_impl(
-            value, output_scale, output_zero_point, quant_min, quant_max, torch.uint8
+            value,
+            output_scale,
+            output_zero_point,
+            quant_min,
+            quant_max,
+            torch.int8 if quant_min < 0 else torch.uint8,
         )
     return value
 

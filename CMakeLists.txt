@@ -919,8 +919,24 @@ if(EXECUTORCH_BUILD_CORTEX_M OR EXECUTORCH_BUILD_CMSIS_NN_PYBINDS)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backends/cortex_m)
 endif()
 
+option(EXECUTORCH_BUILD_PULP_DYNAMIC
+       "Build runtime-tiled PULP operator backend" OFF
+)
+if(EXECUTORCH_BUILD_PULP_DYNAMIC)
+  # Reuse the existing operator registration library and shared runtime.
+  set(EXECUTORCH_BUILD_PULP ON)
+  if(NOT PULP_NN_ROOT)
+    set(PULP_NN_ROOT
+        "${CMAKE_CURRENT_SOURCE_DIR}/../preliminary_material/pulp-nn-example/pulp-nn"
+        CACHE PATH "PULP-NN checkout" FORCE
+    )
+  endif()
+endif()
 if(EXECUTORCH_BUILD_PULP)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backends/pulp)
+endif()
+if(EXECUTORCH_BUILD_PULP_DYNAMIC)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/backends/pulp_dynamic)
 endif()
 
 # If CUDA, Metal, or pybind will need Torch, find it at root scope first so that

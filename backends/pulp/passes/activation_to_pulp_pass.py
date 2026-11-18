@@ -51,7 +51,7 @@ class ActivationToPulpPass(ExportPass):
             quantized_output = False
             if len(node.users) == 1:
                 user = next(iter(node.users))
-                if user.target == q_op and user.args[5] == torch.uint8:
+                if user.target == q_op and user.args[5] in (torch.uint8, torch.int8):
                     output_node = user
                     output_scale, output_zp, qmin, qmax = user.args[1:5]
                     quantized_output = True

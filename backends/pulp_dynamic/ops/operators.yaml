@@ -1,0 +1,17 @@
+- func: pulp_dynamic::quantized_conv2d.out(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int out_shift, int layer_index, Tensor config, int kind=0, bool linear=False, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp_dynamic::convolution_out
+
+- func: pulp_dynamic::quantized_pointwise.out(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int out_shift, int layer_index, Tensor config, int kind=0, bool linear=False, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp_dynamic::convolution_out
+
+- func: pulp_dynamic::quantized_depthwise_conv2d.out(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int out_shift, int layer_index, Tensor config, int kind=0, bool linear=False, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: pulp_dynamic::convolution_out

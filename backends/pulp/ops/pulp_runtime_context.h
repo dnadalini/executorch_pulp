@@ -58,7 +58,7 @@ typedef struct {
   int32_t zero_point;
   int32_t quant_min;
   int32_t quant_max;
-  int quantize;
+  int quantize; // bit 0: quantize; bit 1: signed INT8 storage.
   int status;
 } PulpQuantizationArgs;
 
@@ -74,6 +74,7 @@ typedef struct {
   size_t count;
   float lower, upper, input_scale, output_inverse_scale;
   int32_t input_zero_point, output_zero_point, quant_min, quant_max;
+  // Quantized tags: 0=FP32, 1=UINT8, 2=INT8.
   int kind, input_quantized, output_quantized, status;
 } PulpActivationArgs;
 int pulp_runtime_run_activation(PulpActivationArgs* args);
@@ -102,7 +103,8 @@ typedef struct {
 int pulp_runtime_run_add(PulpAddArgs* args);
 void pulp_cluster_add_entry(void* context);
 
-// Integer affine operation: 0=requantize, 1=add, 2=global average pool.
+// Integer affine operation: low two bits 0=requantize, 1=add, 2=pool;
+// bit 2 selects signed INT8 storage. Existing UINT8 jobs retain values 0..2.
 typedef struct {
   const uint8_t* input;
   const uint8_t* other;
@@ -117,6 +119,14 @@ void pulp_cluster_integer_entry(void* context);
 
 // Platform initialization
 int pulp_runtime_initialize(void);
+// Synchronous FC submission; callers already on the cluster invoke workers
+// directly.
+int pulp_runtime_run_task(void (*entry)(void*), void* args);
+int pulp_runtime_run_task_with_stack(
+    void (*entry)(void*),
+    void* args,
+    uint32_t master_stack,
+    uint32_t slave_stack);
 void pulp_runtime_shutdown(void);
 int pulp_runtime_is_initialized(void);
 

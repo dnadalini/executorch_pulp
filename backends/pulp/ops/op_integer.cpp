@@ -20,7 +20,9 @@ uint64_t magnitude(int64_t value) {
                    : static_cast<uint64_t>(value);
 }
 bool parameters(const Tensor& params, PulpIntegerArgs& job, uint64_t bound) {
-  const bool add = job.operation == 1;
+  const bool add = (job.operation & 3) == 1;
+  const int lo = job.operation & 4 ? -128 : 0;
+  const int hi = job.operation & 4 ? 127 : 255;
   if (params.scalar_type() != ScalarType::Long || params.dim() != 1 ||
       params.size(0) != (add ? 8 : 6))
     return false;
@@ -29,7 +31,7 @@ bool parameters(const Tensor& params, PulpIntegerArgs& job, uint64_t bound) {
   if (p[offset] < 8 || p[offset] > 46 || p[0] < 0)
     return false;
   for (int i = offset + 1; i < (add ? 8 : 6); ++i)
-    if (p[i] < 0 || p[i] > 255)
+    if (p[i] < lo || p[i] > hi)
       return false;
   job.ma = p[0];
   job.mb = add ? p[1] : 0;
@@ -53,14 +55,16 @@ Tensor& elementwise(
     const Tensor& params,
     Tensor& out) {
   PulpIntegerArgs job{};
-  job.operation = other ? 1 : 0;
-  if (input.scalar_type() != ScalarType::Byte ||
-      out.scalar_type() != ScalarType::Byte ||
+  job.operation =
+      (other ? 1 : 0) | (input.scalar_type() == ScalarType::Char ? 4 : 0);
+  if ((input.scalar_type() != ScalarType::Byte &&
+       input.scalar_type() != ScalarType::Char) ||
+      out.scalar_type() != input.scalar_type() ||
       input.dim_order() != out.dim_order() || input.numel() < 0 ||
       static_cast<uint64_t>(input.numel()) >
           std::numeric_limits<size_t>::max() ||
       (other &&
-       (other->scalar_type() != ScalarType::Byte ||
+       (other->scalar_type() != input.scalar_type() ||
         other->sizes() != input.sizes() ||
         other->dim_order() != input.dim_order())) ||
       !parameters(params, job, 255)) {
@@ -72,9 +76,10 @@ Tensor& elementwise(
     ctx.fail(resized);
     return out;
   }
-  job.input = input.const_data_ptr<uint8_t>();
-  job.other = other ? other->const_data_ptr<uint8_t>() : nullptr;
-  job.output = out.mutable_data_ptr<uint8_t>();
+  job.input = static_cast<const uint8_t*>(input.const_data_ptr());
+  job.other =
+      other ? static_cast<const uint8_t*>(other->const_data_ptr()) : nullptr;
+  job.output = static_cast<uint8_t*>(out.mutable_data_ptr());
   job.count = static_cast<size_t>(input.numel());
   if (!pulp_runtime_run_integer(&job))
     ctx.fail(Error::Internal);
@@ -107,9 +112,11 @@ Tensor& quantized_global_avg_pool2d_out(
   const bool channels_last =
       input.dim_order() == ArrayRef<DimOrderType>(nhwc, 4);
   PulpIntegerArgs job{};
-  job.operation = 2;
-  if (input.scalar_type() != ScalarType::Byte || input.dim() != 4 ||
-      out.scalar_type() != ScalarType::Byte || out.dim() != (keepdim ? 4 : 2) ||
+  job.operation = 2 | (input.scalar_type() == ScalarType::Char ? 4 : 0);
+  if ((input.scalar_type() != ScalarType::Byte &&
+       input.scalar_type() != ScalarType::Char) ||
+      input.dim() != 4 || out.scalar_type() != input.scalar_type() ||
+      out.dim() != (keepdim ? 4 : 2) ||
       (!channels_last &&
        input.dim_order() != ArrayRef<DimOrderType>(nchw, 4)) ||
       input.size(2) <= 0 || input.size(3) <= 0 ||
@@ -135,8 +142,8 @@ Tensor& quantized_global_avg_pool2d_out(
     ctx.fail(resized);
     return out;
   }
-  job.input = input.const_data_ptr<uint8_t>();
-  job.output = out.mutable_data_ptr<uint8_t>();
+  job.input = static_cast<const uint8_t*>(input.const_data_ptr());
+  job.output = static_cast<uint8_t*>(out.mutable_data_ptr());
   job.count = static_cast<size_t>(input.numel());
   job.batches = input.size(0);
   job.channels = input.size(1);

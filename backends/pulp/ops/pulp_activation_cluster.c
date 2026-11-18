@@ -32,7 +32,9 @@ static void activation_worker(void* context) {
   tile->errors[core] = 0;
   for (size_t i = begin; i < end; ++i) {
     float x = job->input_quantized
-                  ? ((int32_t)((const uint8_t*)tile->input)[i] -
+                  ? ((int32_t)(job->input_quantized == 2
+                                   ? ((const int8_t*)tile->input)[i]
+                                   : ((const uint8_t*)tile->input)[i]) -
                      job->input_zero_point) *
                         job->input_scale
                   : ((const float*)tile->input)[i];
