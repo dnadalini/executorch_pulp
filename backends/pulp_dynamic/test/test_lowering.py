@@ -75,6 +75,131 @@ class TestDynamicLowering(unittest.TestCase):
         self.assertEqual(edge.exported_program().module()(data).shape, (2, 3, 11))
         self.assertTrue(edge.to_executorch().buffer)
 
+    def test_nchw_convolutions_get_channels_last_inputs(self):
+        class NCHW(torch.nn.Module):
+            def __init__(self, kind):
+                super().__init__()
+                self.conv = torch.nn.Conv2d(
+                    4,
+                    4,
+                    1 if kind == 1 else 3,
+                    padding=0 if kind == 1 else 1,
+                    groups=4 if kind == 2 else 1,
+                )
+
+            def forward(self, x):
+                return self.conv(x.contiguous())
+
+        data = torch.randn(1, 4, 7, 8)
+        spec = (
+            {
+                2: torch.export.Dim("layout_h", min=4, max=10),
+                3: torch.export.Dim("layout_w", min=4, max=10),
+            },
+        )
+        for kind in range(3):
+            with self.subTest(kind=kind):
+                ep = self.lower(NCHW(kind), data, spec).exported_program()
+                conv = next(
+                    n
+                    for n in ep.graph.nodes
+                    if "pulp_dynamic.quantized_" in str(n.target)
+                )
+                self.assertEqual(conv.args[8], kind)
+                self.assertTrue(
+                    conv.args[0]
+                    .meta["val"]
+                    .is_contiguous(memory_format=torch.channels_last)
+                )
+                self.assertTrue(
+                    any(
+                        "dim_order_ops._to_dim_order_copy" in str(n.target)
+                        for n in ep.graph.nodes
+                    )
+                )
+                for h, w in ((4, 10), (10, 4), (7, 8)):
+                    self.assertEqual(
+                        ep.module()(torch.randn(1, 4, h, w)).shape,
+                        (1, 4, h, w),
+                    )
+
+    def test_native_nchw_convolution_preserves_flatten_order(self):
+        class Native(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.randn(5, 3, 3, 3))
+
+            def forward(self, x):
+                y = torch.nn.functional.conv2d(x, self.weight, padding=1)
+                return y.view(1, -1), x + 1
+
+        model = Native().eval()
+        data = torch.randn(1, 3, 6, 7)
+        with pulp_export_context():
+            graph = torch.export.export(model, (data,)).module()
+            graph = PulpDynamicQuantizer().transform_for_annotation(graph)
+            torch.testing.assert_close(graph(data), model(data))
+            conv = next(
+                n
+                for n in graph.graph.nodes
+                if n.target == torch.ops.aten.conv2d.default
+            )
+            self.assertTrue(
+                conv.meta["val"].is_contiguous(memory_format=torch.channels_last)
+            )
+            self.assertEqual(conv.args[0].target, torch.ops.aten._to_copy.default)
+        edge = self.lower(model, data)
+        self.assertTrue(
+            any(
+                "pulp_dynamic.quantized_conv2d" in str(n.target)
+                for n in edge.exported_program().graph.nodes
+            )
+        )
+        self.assertEqual(edge.exported_program().module()(data)[0].shape, (1, 210))
+        self.assertTrue(edge.to_executorch().buffer)
+
+    def test_layout_copy_is_shared_without_changing_other_users(self):
+        class Branches(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.nn.Conv2d(3, 4, 3, padding=1)
+                self.b = torch.nn.Conv2d(3, 5, 1)
+
+            def forward(self, x):
+                return self.a(x), self.b(x), x
+
+        model = prepare_for_pulp_export(Branches().eval())
+        data = torch.randn(1, 3, 6, 7)
+        with pulp_export_context():
+            graph = torch.export.export(model, (data,)).module()
+            quantizer = PulpDynamicQuantizer()
+            for _ in range(2):
+                graph = quantizer.transform_for_annotation(graph)
+                self.assertEqual(
+                    sum(
+                        n.target == torch.ops.aten._to_copy.default
+                        for n in graph.graph.nodes
+                    ),
+                    1,
+                )
+                torch.testing.assert_close(graph(data), model(data))
+
+    def test_nchw_unsupported_groups_remain_portable(self):
+        data = torch.randn(1, 4, 6, 7)
+        for groups in (2, 4):
+            with self.subTest(groups=groups):
+                model = torch.nn.Conv2d(4, 8, 3, padding=1, groups=groups).eval()
+                edge = self.lower(model, data)
+                self.assertFalse(
+                    any(
+                        "pulp_dynamic.quantized_" in str(n.target)
+                        for n in edge.exported_program().graph.nodes
+                    )
+                )
+                torch.testing.assert_close(
+                    edge.exported_program().module()(data), model(data)
+                )
+
     def test_fused_activations(self):
         for kind in range(3):
             for activation in (

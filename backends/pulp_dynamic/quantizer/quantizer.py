@@ -15,7 +15,7 @@ from executorch.backends.pulp_dynamic.config import PulpDynamicConfig
 from .quantization_config import CONV_CONFIG, REGION_CONFIG
 
 
-def support_reason(node, config):
+def support_reason(node, config, *, check_layout=True):
     linear = node.target == torch.ops.aten.linear.default
     values = [node.args[i].meta.get("val") for i in (0, 1)]
     x, w = values
@@ -24,7 +24,9 @@ def support_reason(node, config):
             return "linear requires contiguous input and constant-shaped 2-D weights"
         ci, kh, kw, pad, depth = x.shape[-1], 1, 1, (0, 0), False
     else:
-        if not PulpConv2DCheck.check_pattern([node]):
+        if not PulpConv2DCheck.check_pattern(
+            [node], require_channels_last=check_layout
+        ):
             return "requires batch=1, channels-last, standard/multiplier-one depthwise and dilation=1"
         ci = x.shape[1]
         kh, kw = w.shape[2:]
@@ -130,6 +132,46 @@ class PulpDynamicQuantizer(PulpQuantizer):
         super().__init__()
 
     def transform_for_annotation(self, model):
+        copies = {}
+        for node in list(model.graph.nodes):
+            if (
+                node.target
+                not in (
+                    torch.ops.aten.conv2d.default,
+                    torch.ops.pulp.conv2d_export.default,
+                )
+                or support_reason(node, self.config, check_layout=False) is not None
+            ):
+                continue
+            source = node.args[0]
+            value = source.meta["val"]
+            if not value.is_contiguous(memory_format=torch.channels_last):
+                if source not in copies:
+                    with model.graph.inserting_before(node):
+                        copy = model.graph.call_function(
+                            torch.ops.aten._to_copy.default,
+                            (source,),
+                            {"memory_format": torch.channels_last},
+                        )
+                    copy.meta = source.meta.copy()
+                    copy.meta["val"] = value.clone(memory_format=torch.channels_last)
+                    copies[source] = copy
+                node.args = (copies[source], *node.args[1:])
+            output = node.meta["val"]
+            if not output.is_contiguous(memory_format=torch.channels_last):
+                # Keep downstream views/reshapes and other users' layout contract.
+                with model.graph.inserting_after(node):
+                    restore = model.graph.call_function(
+                        torch.ops.aten._to_copy.default,
+                        (node,),
+                        {"memory_format": torch.contiguous_format},
+                    )
+                restore.meta = node.meta.copy()
+                node.replace_all_uses_with(restore)
+                restore.args = (node,)
+                node.meta["val"] = output.clone(memory_format=torch.channels_last)
+        model.graph.lint()
+        model.recompile()
         for n in model.graph.nodes:
             if n.target in (
                 torch.ops.aten.conv2d.default,

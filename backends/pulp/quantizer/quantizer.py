@@ -29,22 +29,25 @@ from .integer_regions import promote_regions, REGION_CONFIG, REGIONS
 
 class PulpConv2DCheck(PatternCheck):
     @classmethod
-    def check_pattern(cls, pattern: list[Node]) -> bool:
+    def check_pattern(cls, pattern: list[Node], *, require_channels_last=True) -> bool:
         if len(pattern) != 1:
             return False
         node = pattern[0]
         tensor = get_first_fake_tensor(node)
         if tensor.dim() != 4:
             return False
-        if tensor.shape[0] != 1 or not tensor.is_contiguous(
-            memory_format=torch.channels_last
+        if tensor.shape[0] != 1 or (
+            require_channels_last
+            and not tensor.is_contiguous(memory_format=torch.channels_last)
         ):
             return False
         input_tensor = get_first_fake_tensor(cast(Node, node.args[0]))
         weight_tensor = get_first_fake_tensor(cast(Node, node.args[1]))
         if input_tensor.dim() != 4 or weight_tensor.dim() != 4:
             return False
-        if not input_tensor.is_contiguous(memory_format=torch.channels_last):
+        if require_channels_last and not input_tensor.is_contiguous(
+            memory_format=torch.channels_last
+        ):
             return False
         in_channels = input_tensor.shape[1]
         out_channels = weight_tensor.shape[0]

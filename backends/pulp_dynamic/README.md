@@ -51,6 +51,12 @@ Ci reduction tiling is not available. The generator prints fallback node/reason
 and final portable instruction/operator names. Applications must register the
 portable operators their model needs; the example links a selected subset.
 
+Before quantization, eligible convolutions with NCHW inputs receive an explicit
+channels-last copy. Logical [N,C,H,W] dimensions stay unchanged. Copies are shared
+when convolutions use the same input, and native convolution output layouts are
+restored when needed by downstream views. Export memory planning includes these
+buffers; unsupported groups and depthwise multipliers still remain portable.
+
 ## Numerical behavior and fusion
 
 Activations use per-tensor symmetric signed INT8 with zero point zero, weights
